@@ -1,0 +1,120 @@
+# ============================================================
+# Invoice Bot - Configuration Template
+# ============================================================
+# Copy this file to config.yaml and fill in your values.
+# config.yaml is mounted read-only into the container.
+#
+# NEVER commit config.yaml to git (it contains secrets).
+# ============================================================
+
+microsoft:
+  # Azure App Registration Client ID
+  # Get this from portal.azure.com > App registrations > Your app > Overview
+  client_id: "YOUR_CLIENT_ID_HERE"
+
+  # Do NOT change this for personal @hotmail.com / @outlook.com accounts
+  tenant_id: "consumers"
+
+onedrive:
+  # Name of the root folder in OneDrive where invoices will be stored.
+  # The bot creates it automatically at the top level of your OneDrive if absent.
+  # Subfolders YYYY/MM/ are created automatically.
+  folder_name: "YOUR_FOLDER_NAME_HERE"
+
+invoices:
+  # Optional sender whitelist. If omitted or empty, ALL emails with attachments
+  # are scanned — the AI classifier decides what is an invoice.
+  # Uncomment and fill to restrict processing to specific senders only.
+  # whitelisted_senders:
+  #   - "factures@supplier.fr"
+
+  # Per-sender dry-run override. Emails from these addresses are always routed
+  # to the -DRY-RUN OneDrive folder and never written to the DB, regardless of
+  # the global debug.dry_run flag. Useful for personal/shopping addresses.
+  # dry_run_senders:
+  #   - "shopping@you.at"
+
+  # Internal senders — emails from these addresses are NOT suppliers.
+  # The supplier name will be extracted from the document content instead of
+  # the sender domain. Add your father's address and anyone who helps him
+  # (e.g. family members forwarding invoices on his behalf).
+  # internal_senders:
+  #   - "papa@hotmail.com"
+  #   - "cyril@gmail.com"
+
+  # Subject keyword filter. Only emails whose subject contains at least one of
+  # these keywords (case-insensitive) are processed.
+  # Emails with an empty subject are always passed through.
+  subject_keywords:
+    - facture
+    - invoice
+    - avoir
+    - recu
+    - receipt
+    - facturation
+    - paiement
+    - payment
+    - bill
+    - quittance
+    - decompte
+    - releve
+    - cotisation
+    - abonnement
+    - subscription
+    - confirmation de commande
+    - order confirmation
+
+accountant:
+  # Your father's accountant email address
+  email: "comptable@cabinet-comptable.fr"
+
+schedule:
+  # How often to check the inbox (in minutes)
+  poll_interval_minutes: 10
+
+  # Day of month to send the monthly report (1 = 1st of the month)
+  report_day_of_month: 1
+
+  # Hour (UTC) at which to send the report
+  report_hour: 8
+
+classifier:
+  # Anthropic API key for invoice classification (claude-haiku)
+  api_key: "YOUR_ANTHROPIC_API_KEY_HERE"
+
+  # Confidence threshold — below this, files are uploaded anyway (fail-safe)
+  confidence_threshold: 0.5
+
+debug:
+  # Set to true to run the full pipeline without writing to the DB or emailing
+  # the accountant. OneDrive uploads still happen so you can verify files land correctly.
+  dry_run: false
+
+  # If non-empty, overrides accountant.email for all report sends.
+  # Useful for testing — set to your own address to receive the report yourself.
+  report_recipient_override: ""
+
+logging:
+  # Log level for the bot. Supported values: DEBUG, INFO, WARNING, ERROR
+  # Use DEBUG to see raw Claude responses, extraction char counts, and every HTTP request detail.
+  # INFO (default) is recommended for production — one line per meaningful event.
+  log_level: INFO
+
+link_detection:
+  # Keywords used to identify invoice download links in email bodies.
+  # A URL is considered an invoice link if it contains any of these keywords
+  # (case-insensitive). Applies to both HTML and plain-text emails.
+  keywords:
+    - invoice
+    - receipt
+    - download
+    - bill
+    - pdf
+    - facture
+    - recu
+    - telecharger
+    - telechargement
+    - quittance
+    - avoir
+
+
