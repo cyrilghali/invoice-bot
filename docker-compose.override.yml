@@ -1,0 +1,13 @@
+# Optional development services.
+# Docker Compose merges this file automatically with docker-compose.yml.
+# To exclude it in production, use: docker compose -f docker-compose.yml up -d
+
+services:
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "8888:8080"
