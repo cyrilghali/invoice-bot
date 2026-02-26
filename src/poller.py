@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # MIME types considered as invoice attachments
 INVOICE_MIME_TYPES = {
     "application/pdf",
+    "application/x-pdf",  # non-standard alias used by some mail servers
     "image/jpeg",
     "image/png",
     "image/tiff",
@@ -37,6 +38,7 @@ INVOICE_MIME_TYPES = {
 # Fallback extension map for download filename guessing
 _MIME_TO_EXT = {
     "application/pdf": ".pdf",
+    "application/x-pdf": ".pdf",
     "image/jpeg": ".jpg",
     "image/png": ".png",
     "image/tiff": ".tiff",
@@ -137,8 +139,8 @@ class GraphClient:
         max_results: int | None = 50,
     ) -> list[Email]:
         """
-        Fetch emails from inbox that contain invoice file attachments or invoice
-        download links in the body.
+        Fetch emails from inbox (and junk folder for whitelisted senders)
+        that contain invoice file attachments or invoice download links.
 
         Args:
             whitelisted_senders:  Optional sender whitelist. None = all senders.
@@ -155,24 +157,93 @@ class GraphClient:
         sender_filter = set(whitelisted_senders) if whitelisted_senders else None
         subject_filter = [k.lower() for k in subject_keywords] if subject_keywords else None
 
-        # Filtering logic:
-        #   - If sender is whitelisted → always accept (skip subject check)
-        #   - Else if subject_filter set and subject non-empty → must match a keyword
-        #   - Else (no filters set, or empty subject) → accept
+        emails: list[Email] = []
 
-        # Build OData filter — no hasAttachments constraint so link-only emails
-        # are included too.
+        # Scan inbox (all normal filtering rules apply)
+        inbox_emails, inbox_pages = self._scan_folder(
+            folder="inbox",
+            sender_filter=sender_filter,
+            subject_filter=subject_filter,
+            keywords=keywords,
+            since=since,
+            max_results=max_results,
+            whitelisted_only=False,
+        )
+        emails.extend(inbox_emails)
+
+        # Scan additional folders for whitelisted senders only
+        # (junk and archive can contain legitimate invoices mis-routed by Outlook)
+        extra_pages: dict[str, int] = {}
+        if sender_filter:
+            for folder in ("junkemail", "archive"):
+                folder_emails, folder_pages = self._scan_folder(
+                    folder=folder,
+                    sender_filter=sender_filter,
+                    subject_filter=subject_filter,
+                    keywords=keywords,
+                    since=since,
+                    max_results=max_results,
+                    whitelisted_only=True,
+                )
+                emails.extend(folder_emails)
+                extra_pages[folder] = folder_pages
+
+        total_pages = inbox_pages + sum(extra_pages.values())
+        parts = f"inbox={inbox_pages}"
+        for f, p in extra_pages.items():
+            label = "junk" if f == "junkemail" else f
+            parts += f" {label}={p}"
+        logger.info(
+            "Poll complete: pages=%d (%s) emails_with_attachments=%d",
+            total_pages, parts, len(emails),
+        )
+        return emails
+
+    def _scan_folder(
+        self,
+        folder: str,
+        sender_filter: set[str] | None,
+        subject_filter: list[str] | None,
+        keywords: list[str],
+        since: str | None,
+        max_results: int | None,
+        whitelisted_only: bool,
+    ) -> tuple[list[Email], int]:
+        """
+        Scan a single mail folder and return qualifying emails.
+
+        Args:
+            folder:           Graph API well-known folder name (e.g. "inbox", "junkemail").
+            sender_filter:    Set of whitelisted sender addresses (lowercase).
+            subject_filter:   List of subject keywords (lowercase).
+            keywords:         Link detection keywords (lowercase).
+            since:            ISO 8601 date floor.
+            max_results:      Page size cap.
+            whitelisted_only: If True, only process emails from whitelisted senders
+                              (used for junk folder to avoid processing spam).
+
+        Returns:
+            Tuple of (list of qualifying emails, number of pages fetched).
+        """
+        folder_label = "junk" if folder == "junkemail" else folder
+
+        # Filtering logic:
+        #   - If sender is whitelisted -> always accept (skip subject check)
+        #   - Else if whitelisted_only -> skip (junk folder safety)
+        #   - Else if subject_filter set and subject non-empty -> must match a keyword
+        #   - Else (no filters set, or empty subject) -> accept
+
+        # Build OData filter
         filters: list[str] = []
         if since:
             filters.append(f"receivedDateTime gt {since}")
 
         filter_clause = f"&$filter={' and '.join(filters)}" if filters else ""
 
-        # $top controls the page size. Graph API max is 1000.
         page_size = min(max_results, 1000) if max_results is not None else 1000
 
-        url = (
-            f"{GRAPH_BASE}/me/mailFolders/inbox/messages"
+        url: str | None = (
+            f"{GRAPH_BASE}/me/mailFolders/{folder}/messages"
             f"?$select=id,sender,subject,receivedDateTime,hasAttachments,body"
             f"{filter_clause}"
             f"&$orderby=receivedDateTime desc"
@@ -184,10 +255,10 @@ class GraphClient:
 
         while url:
             page_count += 1
-            logger.info("Fetching inbox page %d", page_count)
+            logger.info("Fetching %s page %d", folder_label, page_count)
             data = self._get(url)
             messages = data.get("value", [])
-            logger.debug("Page %d: %d message(s) returned", page_count, len(messages))
+            logger.debug("%s page %d: %d message(s) returned", folder_label, page_count, len(messages))
 
             for msg in messages:
                 sender_address = (
@@ -202,10 +273,11 @@ class GraphClient:
                 sender_whitelisted = sender_filter is not None and sender_address in sender_filter
 
                 if not sender_whitelisted:
-                    if sender_filter is not None:
-                        # Whitelist is active and this sender is not in it — always skip
+                    if whitelisted_only or sender_filter is not None:
+                        # Junk folder: only whitelisted senders allowed
+                        # Inbox with whitelist: sender not in whitelist -> skip
                         logger.debug(
-                            "Skipping email from %s (not whitelisted)", sender_address
+                            "Skipping email from %s in %s (not whitelisted)", sender_address, folder_label
                         )
                         continue
                     # No whitelist: apply subject keyword filter if configured
@@ -250,28 +322,26 @@ class GraphClient:
                     emails.append(email)
                     logger.info(
                         "Email queued: from=%s subject=%r received=%s "
-                        "file_attachments=%d link_attachments=%d",
+                        "file_attachments=%d link_attachments=%d source=%s",
                         email.sender,
                         email.subject,
                         email.received_at,
                         len(file_attachments),
                         len(link_attachments),
+                        folder_label,
                     )
                 else:
                     logger.debug(
-                        "Email from %s subject=%r — no supported attachments or invoice links, skipping",
+                        "Email from %s subject=%r in %s — no supported attachments or invoice links, skipping",
                         sender_address,
                         subject,
+                        folder_label,
                     )
 
             # Handle pagination
             url = data.get("@odata.nextLink")
 
-        logger.info(
-            "Inbox poll complete: pages=%d emails_with_attachments=%d",
-            page_count, len(emails),
-        )
-        return emails
+        return emails, page_count
 
     # -----------------------------------------------------------------------
     # Private helpers
