@@ -30,7 +30,8 @@ def get_config() -> dict:
 
 
 def get_token_cache_path() -> str:
-    data_dir = os.environ.get("DATA_DIR", "/app/data")
+    from utils import DEFAULT_DATA_DIR
+    data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
     return os.path.join(data_dir, "ms_token_cache.json")
 
 
@@ -47,8 +48,14 @@ def save_token_cache(cache: msal.SerializableTokenCache) -> None:
     if cache.has_state_changed:
         cache_path = get_token_cache_path()
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, "w") as f:
-            f.write(cache.serialize())
+        # Write with restrictive permissions (owner-only read/write)
+        fd = os.open(cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(cache.serialize())
+        except Exception:
+            os.close(fd)
+            raise
         logger.info("Token cache saved to %s", cache_path)
 
 
@@ -99,8 +106,8 @@ def get_access_token(client_id: str) -> str:
 
 
 if __name__ == "__main__":
-    from utils import setup_logging
-    data_dir = os.environ.get("DATA_DIR", "/app/data")
+    from utils import DEFAULT_DATA_DIR, setup_logging
+    data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
     setup_logging(data_dir=data_dir, log_level="INFO")
 
     config = get_config()

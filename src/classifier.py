@@ -18,23 +18,28 @@ Return values from is_invoice():
   "rejected" — Claude is confident this is NOT an invoice. Upload to _a_verifier/.
 """
 
+from __future__ import annotations
+
 import base64
 import io
 import json
 import logging
+import math
+import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from poller import Attachment
 
 import anthropic
 import pdfplumber
+
+from utils import normalize_content_type
 
 logger = logging.getLogger(__name__)
 
 MODEL = "claude-haiku-4-5"
 MAX_TEXT_CHARS = 3000  # ~800 tokens — enough for a typical invoice header
-
-# Names of the owner's own businesses — these are the BUYER on invoices, not the supplier.
-# If Claude extracts one of these as the supplier, discard it and fall back to sender domain.
-# Loaded from config at runtime; see config.example.yaml → classifier.owner_business_names
-_OWNER_BUSINESS_NAMES: set[str] = set()
 
 SYSTEM_PROMPT = (
     "Tu es un assistant comptable expert. "
@@ -117,7 +122,8 @@ def _extract_xlsx_text(data: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 # Return type: (is_invoice, confidence, reason, invoice_date, supplier,
-#               amount_ht, amount_tva, amount_ttc, currency)
+#               amount_ht, amount_ttc, amount_tva, currency)
+# NOTE: order is HT, TTC, TVA — consistent with the public is_invoice() API.
 _ClassifyResult = tuple[bool, float, str, str | None, str | None, float | None, float | None, float | None, str | None]
 
 
@@ -129,7 +135,7 @@ def _classify_text(
 ) -> _ClassifyResult:
     """
     Send extracted text to Claude Haiku and parse the JSON response.
-    Returns (is_invoice, confidence, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency).
+    Returns (is_invoice, confidence, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency).
     """
     if not text.strip():
         logger.debug("No text to classify — returning review result immediately")
@@ -160,7 +166,7 @@ def _classify_image(
 ) -> _ClassifyResult:
     """
     Send an image to Claude Haiku vision and parse the JSON response.
-    Returns (is_invoice, confidence, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency).
+    Returns (is_invoice, confidence, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency).
     """
     logger.debug(
         "Sending image to Claude (%s) for vision classification: media_type=%s size=%d bytes (hint=%r)",
@@ -202,7 +208,6 @@ def _parse_amount(value) -> float | None:
         return None
     try:
         f = float(value)
-        import math
         if math.isnan(f) or math.isinf(f):
             return None
         return f
@@ -212,7 +217,7 @@ def _parse_amount(value) -> float | None:
 
 def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyResult:
     """Parse Claude's JSON response.
-    Returns (is_invoice, confidence, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency).
+    Returns (is_invoice, confidence, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency).
     """
     try:
         clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
@@ -225,8 +230,7 @@ def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyR
         raw_date = data.get("invoice_date")
         invoice_date = str(raw_date).strip() if raw_date and str(raw_date).strip().lower() != "null" else None
         if invoice_date:
-            import re as _re
-            if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", invoice_date):
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", invoice_date):
                 logger.debug("invoice_date %r ignored — not YYYY-MM-DD format", invoice_date)
                 invoice_date = None
 
@@ -238,7 +242,7 @@ def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyR
             supplier = None
 
         # Discard supplier if it matches one of the owner's own business names
-        names = owner_names if owner_names is not None else _OWNER_BUSINESS_NAMES
+        names = owner_names if owner_names is not None else set()
         if supplier:
             sup_lower = supplier.lower()
             if any(owned in sup_lower for owned in names):
@@ -257,10 +261,10 @@ def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyR
         else:
             currency = None
 
-        return is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency
+        return is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency
 
     except Exception as e:
-        logger.warning("Failed to parse classifier response %r: %s", raw, e)
+        logger.warning("Failed to parse classifier response %r: %s", raw, e, exc_info=True)
         return True, 0.0, "Parse error — sending to review", None, None, None, None, None, None
 
 
@@ -269,7 +273,7 @@ def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyR
 # ---------------------------------------------------------------------------
 
 def is_invoice(
-    attachment,
+    attachment: Attachment,
     config: dict,
     hint_supplier: str | None = None,
 ) -> tuple[str, str | None, str | None, float | None, float | None, float | None, str | None]:
@@ -298,7 +302,7 @@ def is_invoice(
 
     # Load owner business names from config (used to discard self-references as supplier)
     raw_names: list[str] = classifier_cfg.get("owner_business_names") or []
-    owner_names = {n.lower().strip() for n in raw_names} if raw_names else _OWNER_BUSINESS_NAMES
+    owner_names = {n.lower().strip() for n in raw_names} if raw_names else set()
 
     if not api_key or api_key in ("YOUR_ANTHROPIC_API_KEY_HERE", "your-api-key"):
         logger.warning("Classifier API key not configured — sending to review by default")
@@ -307,7 +311,7 @@ def is_invoice(
     client = anthropic.Anthropic(api_key=api_key)
 
     name_lower = attachment.name.lower()
-    ct = attachment.content_type.split(";")[0].strip().lower()
+    ct = normalize_content_type(attachment.content_type)
     data = attachment.content_bytes
     size_kb = len(data) / 1024
 
@@ -317,25 +321,31 @@ def is_invoice(
     )
 
     try:
-        if ct == "application/pdf" or name_lower.endswith(".pdf"):
-            text = _extract_pdf_text(data)
-            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency = _classify_text(client, text, hint_supplier, owner_names)
-
-        elif ct in ("image/jpeg", "image/jpg") or name_lower.endswith((".jpg", ".jpeg")):
-            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency = _classify_image(client, data, "image/jpeg", hint_supplier, owner_names)
-
-        elif ct == "image/png" or name_lower.endswith(".png"):
-            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency = _classify_image(client, data, "image/png", hint_supplier, owner_names)
-
-        elif ct == "image/tiff" or name_lower.endswith(".tiff"):
-            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency = _classify_image(client, data, "image/tiff", hint_supplier, owner_names)
-
-        elif ct in (
+        # Dispatch by content type — extract text or send image to Claude
+        _PDF_TYPES = {"application/pdf"}
+        _IMAGE_MAP = {
+            "image/jpeg": "image/jpeg", "image/jpg": "image/jpeg",
+            "image/png": "image/png", "image/tiff": "image/tiff",
+        }
+        _XLSX_TYPES = {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.ms-excel",
-        ) or name_lower.endswith((".xlsx", ".xls")):
+        }
+
+        if ct in _PDF_TYPES or name_lower.endswith(".pdf"):
+            text = _extract_pdf_text(data)
+            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency = _classify_text(client, text, hint_supplier, owner_names)
+
+        elif ct in _IMAGE_MAP or name_lower.endswith((".jpg", ".jpeg", ".png", ".tiff")):
+            media = _IMAGE_MAP.get(ct)
+            if not media:
+                ext = name_lower.rsplit(".", 1)[-1]
+                media = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "tiff": "image/tiff"}.get(ext, "image/jpeg")
+            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency = _classify_image(client, data, media, hint_supplier, owner_names)
+
+        elif ct in _XLSX_TYPES or name_lower.endswith((".xlsx", ".xls")):
             text = _extract_xlsx_text(data)
-            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_tva, amount_ttc, currency = _classify_text(client, text, hint_supplier, owner_names)
+            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency = _classify_text(client, text, hint_supplier, owner_names)
 
         else:
             logger.info(

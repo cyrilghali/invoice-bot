@@ -14,9 +14,6 @@ microsoft:
   # Prefer setting via AZURE_CLIENT_ID env var (see .env.example).
   # client_id: "your-client-id"
 
-  # Do NOT change this for personal @hotmail.com / @outlook.com accounts
-  tenant_id: "consumers"
-
 onedrive:
   # Name of the root folder in OneDrive where invoices will be stored.
   # The bot creates it automatically at the top level of your OneDrive if absent.
@@ -29,20 +26,6 @@ invoices:
   # Uncomment and fill to restrict processing to specific senders only.
   # whitelisted_senders:
   #   - "factures@supplier.fr"
-
-  # Per-sender dry-run override. Emails from these addresses are always routed
-  # to the -DRY-RUN OneDrive folder and never written to the DB, regardless of
-  # the global debug.dry_run flag. Useful for personal/shopping addresses.
-  # dry_run_senders:
-  #   - "shopping@you.at"
-
-  # Internal senders — emails from these addresses are NOT suppliers.
-  # The supplier name will be extracted from the document content instead of
-  # the sender domain. Add the account owner's address and anyone who forwards
-  # invoices on their behalf.
-  # internal_senders:
-  #   - "owner@hotmail.com"
-  #   - "helper@gmail.com"
 
   # Subject keyword filter. Only emails whose subject contains at least one of
   # these keywords (case-insensitive) are processed.

@@ -13,6 +13,7 @@ import db
 from classifier import is_invoice
 from onedrive_uploader import build_filename, upload_attachment, upload_to_review
 from poller import Attachment, Email
+from utils import normalize_content_type
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ def process_attachment(
     """
     # --- ZIP: unpack and recurse into each member ---
     name_lower = attachment.name.lower()
-    ct = attachment.content_type.split(";")[0].strip().lower()
+    ct = normalize_content_type(attachment.content_type)
     if ct in ("application/zip", "application/x-zip-compressed") or name_lower.endswith(".zip"):
         members = _unpack_zip(attachment)
         if not members:

@@ -22,7 +22,7 @@ from excel_exporter import build_monthly_excel
 from onedrive_uploader import upload_attachment
 from pipeline import process_attachment
 from poller import GraphClient
-from utils import load_config, setup_logging
+from utils import DEFAULT_DATA_DIR, load_config, setup_logging
 
 logger = logging.getLogger("main")
 
@@ -32,7 +32,7 @@ def poll_inbox(config: dict) -> None:
     logger.info("========== POLL START ==========")
     logger.info("Poll triggered at %s (UTC)", datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
 
-    data_dir = os.environ.get("DATA_DIR", "/app/data")
+    data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
 
     client_id: str = config["microsoft"]["client_id"]
     root_folder_name: str = config["onedrive"]["folder_name"]
@@ -82,14 +82,6 @@ def poll_inbox(config: dict) -> None:
         year = received_dt.year
         month = received_dt.month
 
-        db.mark_email_processed(
-            data_dir,
-            email_id=email.email_id,
-            sender=email.sender,
-            subject=email.subject,
-            received_at=email.received_at,
-        )
-
         for attachment in email.attachments:
             try:
                 status = process_attachment(
@@ -113,6 +105,16 @@ def poll_inbox(config: dict) -> None:
                     exc_info=True,
                 )
 
+        # Mark after all attachments are processed so a crash mid-email
+        # allows the email to be retried on the next poll.
+        db.mark_email_processed(
+            data_dir,
+            email_id=email.email_id,
+            sender=email.sender,
+            subject=email.subject,
+            received_at=email.received_at,
+        )
+
     logger.info("Poll complete. %d new invoice(s) stored.", new_count)
     logger.info("========== POLL END ==========\n")
 
@@ -129,7 +131,7 @@ def send_report(config: dict) -> None:
     logger.info("========== REPORT START ==========")
     logger.info("Monthly Excel report triggered for %d/%02d", report_year, report_month)
 
-    data_dir = os.environ.get("DATA_DIR", "/app/data")
+    data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
 
     if db.has_monthly_report_been_sent(data_dir, report_year, report_month):
         logger.info("Report for %d/%02d already done. Skipping.", report_year, report_month)
@@ -176,7 +178,7 @@ def send_report(config: dict) -> None:
 
 def main() -> None:
     # Bootstrap logging before anything else so all startup messages are captured
-    data_dir = os.environ.get("DATA_DIR", "/app/data")
+    data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
     os.makedirs(data_dir, exist_ok=True)
 
     config = load_config()

@@ -21,7 +21,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
-from onedrive_uploader import _sender_to_label
+from utils import sender_to_label
 from utils import MONTH_NAMES_FR
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,7 @@ def build_monthly_excel(invoices: list[dict], year: int, month: int) -> bytes:
             date_str = raw_date
 
         sender: str = inv.get("sender", "")
-        supplier: str = inv.get("supplier") or _sender_to_label(sender).capitalize()
+        supplier: str = inv.get("supplier") or sender_to_label(sender).capitalize()
         filename: str = inv.get("filename", "")
         drive_link: str = inv.get("drive_web_link", "")
         currency: str = inv.get("currency") or "EUR"

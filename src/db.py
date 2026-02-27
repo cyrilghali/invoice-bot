@@ -2,9 +2,10 @@
 SQLite database layer for deduplication and invoice tracking.
 """
 
+import contextlib
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -14,13 +15,23 @@ def get_connection(data_dir: str) -> sqlite3.Connection:
     db_path = Path(data_dir) / "invoices.db"
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+@contextlib.contextmanager
+def _connect(data_dir: str):
+    """Context manager that opens and auto-closes a DB connection."""
+    conn = get_connection(data_dir)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db(data_dir: str) -> None:
     """Create tables if they don't exist, and run migrations for existing DBs."""
-    conn = get_connection(data_dir)
-    try:
+    with _connect(data_dir) as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS processed_emails (
                 email_id        TEXT PRIMARY KEY,
@@ -59,45 +70,26 @@ def init_db(data_dir: str) -> None:
             row[1]
             for row in conn.execute("PRAGMA table_info(invoices)").fetchall()
         }
-        if "invoice_date" not in existing_cols:
-            conn.execute("ALTER TABLE invoices ADD COLUMN invoice_date TEXT")
-            conn.commit()
-            logger.info("Migration: added invoice_date column to invoices table")
-        if "supplier" not in existing_cols:
-            conn.execute("ALTER TABLE invoices ADD COLUMN supplier TEXT")
-            conn.commit()
-            logger.info("Migration: added supplier column to invoices table")
-        if "amount_ht" not in existing_cols:
-            conn.execute("ALTER TABLE invoices ADD COLUMN amount_ht REAL")
-            conn.commit()
-            logger.info("Migration: added amount_ht column to invoices table")
-        if "amount_ttc" not in existing_cols:
-            conn.execute("ALTER TABLE invoices ADD COLUMN amount_ttc REAL")
-            conn.commit()
-            logger.info("Migration: added amount_ttc column to invoices table")
-        if "amount_tva" not in existing_cols:
-            conn.execute("ALTER TABLE invoices ADD COLUMN amount_tva REAL")
-            conn.commit()
-            logger.info("Migration: added amount_tva column to invoices table")
-        if "currency" not in existing_cols:
-            conn.execute("ALTER TABLE invoices ADD COLUMN currency TEXT")
-            conn.commit()
-            logger.info("Migration: added currency column to invoices table")
+        migrations = [
+            ("invoice_date", "TEXT"), ("supplier", "TEXT"),
+            ("amount_ht", "REAL"), ("amount_ttc", "REAL"),
+            ("amount_tva", "REAL"), ("currency", "TEXT"),
+        ]
+        for col_name, col_type in migrations:
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE invoices ADD COLUMN {col_name} {col_type}")
+                conn.commit()
+                logger.info("Migration: added %s column to invoices table", col_name)
 
         logger.info("Database initialized at %s", Path(data_dir) / "invoices.db")
-    finally:
-        conn.close()
 
 
 def is_email_processed(data_dir: str, email_id: str) -> bool:
-    conn = get_connection(data_dir)
-    try:
+    with _connect(data_dir) as conn:
         row = conn.execute(
             "SELECT 1 FROM processed_emails WHERE email_id = ?", (email_id,)
         ).fetchone()
         return row is not None
-    finally:
-        conn.close()
 
 
 def mark_email_processed(
@@ -107,20 +99,17 @@ def mark_email_processed(
     subject: str,
     received_at: str,
 ) -> None:
-    conn = get_connection(data_dir)
-    try:
+    with _connect(data_dir) as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO processed_emails
                 (email_id, processed_at, sender, subject, received_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (email_id, datetime.utcnow().isoformat(), sender, subject, received_at),
+            (email_id, datetime.now(timezone.utc).isoformat(), sender, subject, received_at),
         )
         conn.commit()
         logger.info("Email marked as processed: id=%s sender=%s subject=%r", email_id, sender, subject)
-    finally:
-        conn.close()
 
 
 def save_invoice(
@@ -140,8 +129,7 @@ def save_invoice(
     amount_tva: float | None = None,
     currency: str | None = None,
 ) -> None:
-    conn = get_connection(data_dir)
-    try:
+    with _connect(data_dir) as conn:
         cursor = conn.execute(
             """
             INSERT INTO invoices
@@ -174,14 +162,11 @@ def save_invoice(
             cursor.lastrowid, filename, year, month, supplier,
             invoice_date, amount_ht, amount_ttc, currency,
         )
-    finally:
-        conn.close()
 
 
 def get_unreported_invoices(data_dir: str, year: int, month: int) -> list[dict]:
     """Return all invoices for a given year/month that have not been reported yet."""
-    conn = get_connection(data_dir)
-    try:
+    with _connect(data_dir) as conn:
         rows = conn.execute(
             """
             SELECT * FROM invoices
@@ -193,42 +178,31 @@ def get_unreported_invoices(data_dir: str, year: int, month: int) -> list[dict]:
         result = [dict(row) for row in rows]
         logger.info("Queried unreported invoices: year=%d month=%d count=%d", year, month, len(result))
         return result
-    finally:
-        conn.close()
 
 
 def mark_invoices_reported(data_dir: str, invoice_ids: list[int]) -> None:
-    conn = get_connection(data_dir)
-    try:
+    with _connect(data_dir) as conn:
         conn.executemany(
             "UPDATE invoices SET reported = 1 WHERE id = ?",
             [(i,) for i in invoice_ids],
         )
         conn.commit()
         logger.info("Marked %d invoice(s) as reported.", len(invoice_ids))
-    finally:
-        conn.close()
 
 
 def save_monthly_report(data_dir: str, year: int, month: int) -> None:
-    conn = get_connection(data_dir)
-    try:
+    with _connect(data_dir) as conn:
         conn.execute(
             "INSERT OR IGNORE INTO monthly_reports (year, month, sent_at) VALUES (?, ?, ?)",
-            (year, month, datetime.utcnow().isoformat()),
+            (year, month, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def has_monthly_report_been_sent(data_dir: str, year: int, month: int) -> bool:
-    conn = get_connection(data_dir)
-    try:
+    with _connect(data_dir) as conn:
         row = conn.execute(
             "SELECT 1 FROM monthly_reports WHERE year = ? AND month = ?",
             (year, month),
         ).fetchone()
         return row is not None
-    finally:
-        conn.close()

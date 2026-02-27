@@ -7,9 +7,11 @@ and returns them for further processing.
 """
 
 import base64
+import ipaddress
 import logging
 import mimetypes
 import re
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -18,7 +20,7 @@ from urllib.parse import urlparse
 import requests
 
 from auth_setup import get_access_token
-from utils import GRAPH_BASE
+from utils import GRAPH_BASE, normalize_content_type
 
 logger = logging.getLogger(__name__)
 
@@ -376,7 +378,7 @@ class GraphClient:
                 continue
 
             # Skip unsupported MIME types early (avoid unnecessary downloads)
-            if att.get("contentType", "").split(";")[0].strip() not in INVOICE_MIME_TYPES:
+            if normalize_content_type(att.get("contentType", "")) not in INVOICE_MIME_TYPES:
                 logger.debug("Skipping attachment %s: unsupported type %s", att.get("name"), att.get("contentType"))
                 continue
 
@@ -406,7 +408,7 @@ class GraphClient:
             try:
                 content_bytes = base64.b64decode(content_b64)
             except Exception:
-                logger.warning("Could not decode attachment %s", att.get("name"))
+                logger.warning("Could not decode attachment %s", att.get("name"), exc_info=True)
                 continue
 
             att_name = att_detail.get("name", att.get("name", "attachment"))
@@ -478,12 +480,29 @@ class GraphClient:
 
         return filtered
 
+    @staticmethod
+    def _is_private_url(url: str) -> bool:
+        """Check if a URL resolves to a private/reserved IP address (SSRF protection)."""
+        try:
+            hostname = urlparse(url).hostname
+            if not hostname:
+                return True
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for _, _, _, _, sockaddr in addr_info:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                    return True
+        except Exception:
+            return True  # unresolvable or any DNS error = reject
+        return False
+
     def _download_link(self, url: str) -> Attachment | None:
         """
         Download a file from a URL and return it as an Attachment.
 
         Follows redirects (up to requests' default of 30, capped at 5 by max_redirects).
         Returns None if the content-type is unsupported or the download fails.
+        Rejects URLs that resolve to private/reserved IP addresses (SSRF protection).
 
         Args:
             url: URL to download.
@@ -492,12 +511,16 @@ class GraphClient:
             Attachment on success, None on failure.
         """
         logger.info("Attempting to download invoice from link: %s", url)
+
+        if self._is_private_url(url):
+            logger.warning("Rejecting download URL %s: resolves to private/reserved IP", url)
+            return None
+
         try:
             resp = requests.get(
                 url,
                 allow_redirects=True,
                 timeout=30,
-                stream=True,
                 headers={"User-Agent": "Mozilla/5.0 (invoice-bot)"},
             )
             resp.raise_for_status()
@@ -507,13 +530,23 @@ class GraphClient:
 
         # Determine content-type (strip charset/boundary suffixes)
         raw_ct = resp.headers.get("Content-Type", "")
-        content_type = raw_ct.split(";")[0].strip().lower()
+        content_type = normalize_content_type(raw_ct)
 
         if content_type not in INVOICE_MIME_TYPES:
             logger.warning(
                 "Skipping download from %s: unsupported content-type %r",
                 url,
                 content_type,
+            )
+            return None
+
+        # Reject excessively large downloads (same 20 MB cap as file attachments)
+        content_length = resp.headers.get("Content-Length")
+        if content_length and int(content_length) > 20 * 1024 * 1024:
+            logger.warning(
+                "Skipping download from %s: Content-Length %s bytes exceeds 20 MB limit",
+                url,
+                content_length,
             )
             return None
 
@@ -524,6 +557,15 @@ class GraphClient:
             content_bytes = resp.content
         except Exception as e:
             logger.warning("Failed to read response body from %s: %s", url, e)
+            return None
+
+        # Double-check actual size (Content-Length can be absent or wrong)
+        if len(content_bytes) > 20 * 1024 * 1024:
+            logger.warning(
+                "Skipping download from %s: actual size %d bytes exceeds 20 MB limit",
+                url,
+                len(content_bytes),
+            )
             return None
 
         logger.info(

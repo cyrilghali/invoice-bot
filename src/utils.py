@@ -5,6 +5,7 @@ Shared constants and utilities used across multiple modules.
 import logging
 import logging.handlers
 import os
+import re
 import sys
 
 import yaml
@@ -13,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 # Microsoft Graph API base URL
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+# Default data directory (centralised to avoid repeating the fallback everywhere)
+DEFAULT_DATA_DIR = "/app/data"
 
 # French month names (1-indexed; index 0 is empty)
 MONTH_NAMES_FR = [
@@ -98,3 +102,56 @@ def load_config() -> dict:
         cfg.setdefault("classifier", {})["api_key"] = env_api_key
 
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Filename / label helpers (shared by onedrive_uploader and excel_exporter)
+# ---------------------------------------------------------------------------
+
+def normalize_content_type(ct: str) -> str:
+    """Strip charset/boundary suffixes and normalise a MIME content-type string."""
+    return ct.split(";")[0].strip().lower()
+
+
+def sanitize_filename(name: str) -> str:
+    """Remove characters that are problematic in filenames."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+
+
+# Common TLD suffixes to strip when extracting the company name from a domain.
+_COMPOUND_TLDS = {
+    "co.uk", "co.jp", "co.nz", "co.za", "co.in", "co.kr",
+    "com.au", "com.br", "com.fr", "com.mx", "com.ar",
+    "org.uk", "net.au", "gov.uk",
+}
+
+
+def sender_to_label(sender: str) -> str:
+    """
+    Extract the company name from a sender email address.
+
+    Strategy: take the second-level domain (just before the TLD), which is
+    almost always the company name regardless of subdomains or compound TLDs.
+
+    Examples:
+        noreply@hotmail.com               -> hotmail
+        factures@edf.fr                   -> edf
+        billing@notifications.amazon.fr   -> amazon
+        invoice@free.fr                   -> free
+        support@company.co.uk             -> company
+    """
+    if "@" in sender:
+        domain = sender.split("@")[-1].lower().strip()
+    else:
+        domain = sender.lower().strip()
+
+    parts = domain.split(".")
+
+    if len(parts) >= 3 and ".".join(parts[-2:]) in _COMPOUND_TLDS:
+        company = parts[-3]
+    elif len(parts) >= 2:
+        company = parts[-2]
+    else:
+        company = parts[0]
+
+    return sanitize_filename(company)
