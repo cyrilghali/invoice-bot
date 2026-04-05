@@ -193,7 +193,7 @@ def save_invoice(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                email_id,
+                email_id or source_document_id or "",
                 source_name,
                 source_document_id,
                 filename,
