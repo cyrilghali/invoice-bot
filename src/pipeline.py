@@ -4,6 +4,7 @@ Attachment processing pipeline.
 Classifies each email attachment and routes it to the appropriate OneDrive folder.
 """
 
+import hashlib
 import io
 import logging
 import zipfile
@@ -132,6 +133,16 @@ def process_attachment(
         sender,
     )
 
+    # Cross-source dedup: skip if identical content was already invoiced
+    content_hash = hashlib.sha256(attachment.content_bytes).hexdigest()
+    existing = db.is_content_already_invoiced(data_dir, content_hash)
+    if existing:
+        logger.info(
+            "DUPLICATE skipped: file=%r matches existing invoice id=%d (%s via %s)",
+            attachment.name, existing["id"], existing["filename"], existing.get("source_name"),
+        )
+        return "duplicate"
+
     # Look up canonical supplier hint for this sender
     sender_key = sender.lower().strip()
     sender_suppliers: dict[str, str] = (config.get("invoices") or {}).get("sender_suppliers") or {}
@@ -218,6 +229,7 @@ def process_attachment(
             amount_ttc=amount_ttc,
             amount_tva=amount_tva,
             currency=currency,
+            content_hash=content_hash,
         )
         logger.info(
             "Invoice saved to DB: filename=%r year=%d month=%d link=%s",

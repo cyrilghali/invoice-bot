@@ -182,7 +182,7 @@ def run(config: dict, data_dir: str) -> None:
 
     # Print summary to stdout (for Hermes to read)
     for r in results:
-        status_icon = {"invoice": "✅", "review": "⚠️", "rejected": "❌", "skipped": "⏭️", "error": "💥"}.get(r["status"], "?")
+        status_icon = {"invoice": "✅", "review": "⚠️", "rejected": "❌", "skipped": "⏭️", "duplicate": "⏭️", "error": "💥"}.get(r["status"], "?")
         reason = f" ({r['reason']})" if "reason" in r else ""
         print(f"{status_icon} {os.path.basename(r['file'])}: {r['status']}{reason}")
 

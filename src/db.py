@@ -91,6 +91,7 @@ def init_db(data_dir: str) -> None:
             ("amount_ht", "REAL"), ("amount_ttc", "REAL"),
             ("amount_tva", "REAL"), ("currency", "TEXT"),
             ("source_name", "TEXT"), ("source_document_id", "TEXT"),
+            ("content_hash", "TEXT"),
         ]
         for col_name, col_type in migrations:
             if col_name not in existing_cols:
@@ -160,6 +161,31 @@ def mark_document_processed(
 
 
 # ---------------------------------------------------------------------------
+# Content-hash cross-source dedup
+# ---------------------------------------------------------------------------
+
+def is_content_already_invoiced(data_dir: str, content_hash: str) -> dict | None:
+    """Check if a file with this content hash was already saved as an invoice.
+
+    Returns the existing invoice row (as dict) if found, None otherwise.
+    This catches duplicates across sources (e.g. same PDF via email AND WhatsApp).
+    """
+    with _connect(data_dir) as conn:
+        row = conn.execute(
+            "SELECT * FROM invoices WHERE content_hash = ? LIMIT 1",
+            (content_hash,),
+        ).fetchone()
+        if row:
+            result = dict(row)
+            logger.info(
+                "Content hash %s… already invoiced: id=%d source=%s filename=%r",
+                content_hash[:12], result["id"], result.get("source_name"), result["filename"],
+            )
+            return result
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Invoice CRUD
 # ---------------------------------------------------------------------------
 
@@ -181,6 +207,7 @@ def save_invoice(
     amount_ttc: float | None = None,
     amount_tva: float | None = None,
     currency: str | None = None,
+    content_hash: str | None = None,
 ) -> None:
     with _connect(data_dir) as conn:
         cursor = conn.execute(
@@ -189,8 +216,8 @@ def save_invoice(
                 (email_id, source_name, source_document_id, filename,
                  drive_file_id, drive_web_link,
                  sender, received_at, year, month, invoice_date, supplier,
-                 amount_ht, amount_ttc, amount_tva, currency)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 amount_ht, amount_ttc, amount_tva, currency, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 email_id or source_document_id or "",
@@ -209,6 +236,7 @@ def save_invoice(
                 amount_ttc,
                 amount_tva,
                 currency,
+                content_hash,
             ),
         )
         conn.commit()
