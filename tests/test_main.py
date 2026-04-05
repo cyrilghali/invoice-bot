@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from main import _load_source_module, _register_sources, send_report
+from main import _load_source_module, _build_instance_config, _register_sources, send_report
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +95,9 @@ class TestRegisterSources:
         _register_sources(scheduler, config, "/tmp/data")
         assert scheduler.add_job.call_count == 2
 
-    def test_injects_source_name(self):
-        scheduler = MagicMock()
+    def test_source_name_in_runner_config(self):
+        """Verify source_name is set when the runner builds instance config at runtime."""
+        from main import _build_instance_config
         config = {
             "sources": {
                 "my_inbox": {
@@ -107,9 +108,10 @@ class TestRegisterSources:
                 },
             },
         }
-        _register_sources(scheduler, config, "/tmp/data")
-        # Verify source_name was injected into instance config
-        assert config["sources"]["my_inbox"]["source_name"] == "my_inbox"
+        instance_config = _build_instance_config(config, "my_inbox")
+        assert instance_config["source_name"] == "my_inbox"
+        # Original config should not be mutated
+        assert "source_name" not in config["sources"]["my_inbox"]
 
     def test_no_sources_configured(self):
         scheduler = MagicMock()
@@ -132,8 +134,9 @@ class TestRegisterSources:
         _register_sources(scheduler, config, "/tmp/data")
         # Get the runner function that was registered
         runner = scheduler.add_job.call_args[0][0]
-        # Patch the actual source to raise — runner should not propagate
-        with patch("sources.email_source.run", side_effect=Exception("boom")):
+        # Patch load_config (runner reloads config) and the source to raise
+        with patch("main.load_config", return_value=config), \
+             patch("sources.email_source.run", side_effect=Exception("boom")):
             runner()  # Should not raise
 
 
@@ -142,33 +145,35 @@ class TestRegisterSources:
 # ---------------------------------------------------------------------------
 
 class TestSendReport:
-    def _base_config(self):
-        return {
-            "microsoft": {"client_id": "cid"},
-            "onedrive": {"folder_name": "Root"},
-        }
+    _BASE_CONFIG = {
+        "microsoft": {"client_id": "cid"},
+        "onedrive": {"folder_name": "Root"},
+    }
 
+    @patch("main.load_config", return_value=_BASE_CONFIG)
     @patch("main.db")
-    def test_skips_if_already_sent(self, mock_db, monkeypatch):
+    def test_skips_if_already_sent(self, mock_db, _mock_cfg, monkeypatch):
         monkeypatch.setenv("DATA_DIR", "/tmp/test-data")
         mock_db.has_monthly_report_been_sent.return_value = True
 
-        send_report(self._base_config())
+        send_report()
         mock_db.get_unreported_invoices.assert_not_called()
 
+    @patch("main.load_config", return_value=_BASE_CONFIG)
     @patch("main.db")
-    def test_skips_if_no_invoices(self, mock_db, monkeypatch):
+    def test_skips_if_no_invoices(self, mock_db, _mock_cfg, monkeypatch):
         monkeypatch.setenv("DATA_DIR", "/tmp/test-data")
         mock_db.has_monthly_report_been_sent.return_value = False
         mock_db.get_unreported_invoices.return_value = []
 
-        send_report(self._base_config())
+        send_report()
         mock_db.save_monthly_report.assert_called_once()
 
+    @patch("main.load_config", return_value=_BASE_CONFIG)
     @patch("main.upload_attachment", return_value=("fid", "https://link"))
     @patch("main.build_monthly_excel", return_value=b"xlsx-bytes")
     @patch("main.db")
-    def test_builds_and_uploads_report(self, mock_db, mock_excel, mock_upload, monkeypatch):
+    def test_builds_and_uploads_report(self, mock_db, mock_excel, mock_upload, _mock_cfg, monkeypatch):
         monkeypatch.setenv("DATA_DIR", "/tmp/test-data")
         mock_db.has_monthly_report_been_sent.return_value = False
         mock_db.get_unreported_invoices.return_value = [
@@ -176,7 +181,7 @@ class TestSendReport:
             {"id": 2, "filename": "inv2.pdf"},
         ]
 
-        send_report(self._base_config())
+        send_report()
         mock_excel.assert_called_once()
         mock_upload.assert_called_once()
         mock_db.mark_invoices_reported.assert_called_once_with(

@@ -79,6 +79,7 @@ def process_attachment(
     root_folder_name: str,
     source_name: str | None = None,
     source_document_id: str | None = None,
+    account_hint: str | None = None,
 ) -> str:
     """
     Classify a single attachment and upload it to the appropriate OneDrive folder.
@@ -114,6 +115,7 @@ def process_attachment(
                     root_folder_name=root_folder_name,
                     source_name=source_name,
                     source_document_id=source_document_id,
+                    account_hint=account_hint,
                 )
                 if member_status == "invoice":
                     any_invoice = True
@@ -184,6 +186,7 @@ def process_attachment(
             month=inv_month,
             invoice_date=invoice_date,
             supplier=filename_supplier,
+            account_hint=account_hint,
         )
         db.save_invoice(
             data_dir,
@@ -224,6 +227,7 @@ def process_attachment(
             month=inv_month,
             invoice_date=invoice_date,
             supplier=filename_supplier,
+            account_hint=account_hint,
         )
     else:
         # rejected — confidently not an invoice (CGU, CGV, logos, etc.) — skip entirely

@@ -47,14 +47,47 @@ def _load_source_module(module_name: str):
     return run_fn
 
 
-def _make_source_runner(run_fn, instance_config: dict, data_dir: str):
-    """Return a callable that APScheduler can invoke for a source job."""
+def _build_instance_config(config: dict, instance_name: str) -> dict | None:
+    """Build a merged instance config from the top-level config for a given source instance."""
+    sources_config = config.get("sources", {})
+    instance_config = sources_config.get(instance_name)
+    if instance_config is None:
+        return None
+
+    # Make a copy to avoid mutating the parsed config
+    instance_config = dict(instance_config)
+    instance_config["source_name"] = instance_name
+
+    # Inherit top-level config that sources may need
+    if "client_id" not in instance_config:
+        instance_config["client_id"] = config.get("microsoft", {}).get("client_id")
+    if "invoices" in config and "invoices" not in instance_config:
+        instance_config["invoices"] = config["invoices"]
+    if "classifier" in config and "classifier" not in instance_config:
+        instance_config["classifier"] = config["classifier"]
+    if "debug" in config:
+        if "since_date" not in instance_config and config["debug"].get("since_date"):
+            instance_config["since_date"] = config["debug"]["since_date"]
+
+    return instance_config
+
+
+def _make_source_runner(run_fn, instance_name: str, data_dir: str):
+    """Return a callable that APScheduler can invoke for a source job.
+
+    Config is reloaded from disk on every invocation so changes take effect
+    without restarting the process.
+    """
     def runner():
         try:
+            config = load_config(exit_on_error=False)
+            instance_config = _build_instance_config(config, instance_name)
+            if instance_config is None:
+                logger.warning("Source '%s' removed from config — skipping run", instance_name)
+                return
             run_fn(instance_config, data_dir)
         except Exception as e:
-            source_name = instance_config.get("source_name", "unknown")
-            logger.error("Source %s crashed: %s", source_name, e, exc_info=True)
+            logger.error("Source %s crashed: %s", instance_name, e, exc_info=True)
     return runner
 
 
@@ -71,18 +104,9 @@ def _register_sources(scheduler: BlockingScheduler, config: dict, data_dir: str)
         if run_fn is None:
             continue
 
-        # Inject instance name into config so the source knows its identity
-        instance_config["source_name"] = instance_name
-
-        # Also pass through top-level config that sources may need
-        if "invoices" in config and "invoices" not in instance_config:
-            instance_config["invoices"] = config["invoices"]
-        if "classifier" in config and "classifier" not in instance_config:
-            instance_config["classifier"] = config["classifier"]
-
         interval = instance_config.get("interval_minutes")
         if interval:
-            runner = _make_source_runner(run_fn, instance_config, data_dir)
+            runner = _make_source_runner(run_fn, instance_name, data_dir)
             scheduler.add_job(
                 runner,
                 trigger=IntervalTrigger(minutes=int(interval)),
@@ -99,8 +123,12 @@ def _register_sources(scheduler: BlockingScheduler, config: dict, data_dir: str)
 # Monthly Excel report job
 # ---------------------------------------------------------------------------
 
-def send_report(config: dict) -> None:
-    """Build a monthly Excel summary and upload it to OneDrive."""
+def send_report() -> None:
+    """Build a monthly Excel summary and upload it to OneDrive.
+
+    Config is reloaded from disk so changes take effect without restarting.
+    """
+    config = load_config(exit_on_error=False)
     now = datetime.now(tz=timezone.utc)
     report_year, report_month = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
 
@@ -121,6 +149,7 @@ def send_report(config: dict) -> None:
         return
 
     client_id: str = config["microsoft"]["client_id"]
+    report_account: str | None = config.get("onedrive", {}).get("account") or None
     root_folder_name: str = config["onedrive"]["folder_name"]
     excel_filename = f"{report_year}-{report_month:02d}_summary.xlsx"
 
@@ -136,6 +165,7 @@ def send_report(config: dict) -> None:
             received_at=f"{report_year}-{report_month:02d}-01T00:00:00Z",
             year=report_year,
             month=report_month,
+            account_hint=report_account,
         )
         logger.info("Excel summary uploaded to OneDrive: %s", excel_link)
     except Exception as e:
@@ -208,7 +238,6 @@ def main() -> None:
     scheduler.add_job(
         send_report,
         trigger=CronTrigger(day=report_day, hour=report_hour, minute=0),
-        args=[config],
         id="monthly_report",
         name="Upload monthly Excel summary to OneDrive",
     )

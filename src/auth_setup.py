@@ -67,10 +67,17 @@ def build_app(client_id: str, cache: msal.SerializableTokenCache) -> msal.Public
     )
 
 
-def get_access_token(client_id: str) -> str:
+def get_access_token(client_id: str, account_hint: str | None = None) -> str:
     """
     Return a valid access token, using cache if possible,
     otherwise trigger Device Code Flow.
+
+    Args:
+        client_id:    Azure App Registration Client ID.
+        account_hint: Email address to select the right account from the MSAL
+                      token cache (e.g. "user@hotmail.com").  Required when
+                      multiple accounts share the same client_id.
+                      If None, falls back to the first cached account.
     """
     cache = load_token_cache()
     app = build_app(client_id, cache)
@@ -78,10 +85,25 @@ def get_access_token(client_id: str) -> str:
     # Try silent acquisition first (uses refresh token)
     accounts = app.get_accounts()
     if accounts:
-        result = app.acquire_token_silent(SCOPES, account=accounts[0])
-        if result and "access_token" in result:
-            save_token_cache(cache)
-            return result["access_token"]
+        # Pick the right account when multiple are cached
+        account = accounts[0]
+        if account_hint:
+            hint_lower = account_hint.lower().strip()
+            matched = [a for a in accounts if a.get("username", "").lower() == hint_lower]
+            if matched:
+                account = matched[0]
+            else:
+                logger.warning(
+                    "No cached account for '%s' (available: %s) — will trigger device flow",
+                    account_hint, [a.get("username") for a in accounts],
+                )
+                account = None
+
+        if account:
+            result = app.acquire_token_silent(SCOPES, account=account)
+            if result and "access_token" in result:
+                save_token_cache(cache)
+                return result["access_token"]
 
     # Fall back to Device Code Flow
     flow = app.initiate_device_flow(scopes=SCOPES)
@@ -106,9 +128,19 @@ def get_access_token(client_id: str) -> str:
 
 
 if __name__ == "__main__":
+    import argparse
+
     from utils import DEFAULT_DATA_DIR, setup_logging
     data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
     setup_logging(data_dir=data_dir, log_level="INFO")
+
+    parser = argparse.ArgumentParser(description="Microsoft account authentication setup")
+    parser.add_argument(
+        "account", nargs="?", default=None,
+        help="Email address of the account to authenticate (e.g. user@hotmail.com). "
+             "If omitted, authenticates the first/only account.",
+    )
+    args = parser.parse_args()
 
     config = get_config()
     client_id = config["microsoft"]["client_id"]
@@ -117,7 +149,8 @@ if __name__ == "__main__":
         logger.error("Please set AZURE_CLIENT_ID in .env (or microsoft.client_id in config.yaml).")
         sys.exit(1)
 
-    logger.info("Starting Microsoft authentication setup...")
-    token = get_access_token(client_id)
-    logger.info("Setup complete. The bot will now run without any further interaction.")
+    account_label = args.account or "(default)"
+    logger.info("Starting Microsoft authentication setup for %s ...", account_label)
+    token = get_access_token(client_id, account_hint=args.account)
+    logger.info("Setup complete for %s.", account_label)
     logger.info("Note: Re-run this script if the bot reports authentication errors after 90 days of inactivity.")

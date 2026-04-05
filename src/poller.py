@@ -115,13 +115,14 @@ class Email:
 # ---------------------------------------------------------------------------
 
 class GraphClient:
-    def __init__(self, client_id: str):
+    def __init__(self, client_id: str, account_hint: str | None = None):
         self.client_id = client_id
+        self.account_hint = account_hint
         self._token: str | None = None
 
     def _get_token(self) -> str:
         if self._token is None:
-            self._token = get_access_token(self.client_id)
+            self._token = get_access_token(self.client_id, account_hint=self.account_hint)
         return self._token
 
     def _headers(self) -> dict:
@@ -132,7 +133,7 @@ class GraphClient:
 
     def _refresh_token(self) -> None:
         """Force a token refresh on 401."""
-        self._token = get_access_token(self.client_id)
+        self._token = get_access_token(self.client_id, account_hint=self.account_hint)
 
     def _get(self, url: str, **kwargs) -> dict:
         for attempt in range(2):

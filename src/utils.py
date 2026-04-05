@@ -73,11 +73,16 @@ def setup_logging(data_dir: str = "data", log_level: str = "INFO") -> None:
     )
 
 
-def load_config() -> dict:
+def load_config(exit_on_error: bool = True) -> dict:
     """Load YAML configuration and overlay secrets from environment variables.
 
     Environment variables take precedence over config.yaml values:
       AZURE_CLIENT_ID    -> microsoft.client_id
+
+    Args:
+        exit_on_error: If True (default, for startup), call sys.exit on failure.
+            If False (for runtime reloads), raise the exception instead so the
+            running process survives a bad config edit.
     """
     config_path = os.environ.get("CONFIG_PATH", "config.yaml")
     try:
@@ -86,10 +91,14 @@ def load_config() -> dict:
         logger.info("Configuration loaded from %s", config_path)
     except FileNotFoundError:
         logger.error("config.yaml not found at %s", config_path)
-        sys.exit(1)
+        if exit_on_error:
+            sys.exit(1)
+        raise
     except yaml.YAMLError as e:
         logger.error("Invalid config.yaml: %s", e)
-        sys.exit(1)
+        if exit_on_error:
+            sys.exit(1)
+        raise
 
     # Overlay secrets from environment variables (take precedence over YAML)
     env_client_id = os.environ.get("AZURE_CLIENT_ID")

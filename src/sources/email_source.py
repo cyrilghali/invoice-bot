@@ -38,6 +38,10 @@ def run(config: dict, data_dir: str) -> None:
     logger.info("Poll triggered at %s (UTC)", started_at)
 
     client_id: str = config["client_id"]
+    account_hint: str | None = config.get("account") or None
+    # OneDrive upload can use a different account (e.g. centralize invoices
+    # from multiple inboxes into one OneDrive). Falls back to inbox account.
+    upload_account_hint: str | None = config.get("onedrive_account") or account_hint
     root_folder_name: str = config["onedrive_folder_name"]
 
     # Optional whitelist
@@ -54,7 +58,7 @@ def run(config: dict, data_dir: str) -> None:
     if subject_keywords:
         logger.info("Subject keyword filter active: %d keywords", len(subject_keywords))
 
-    graph = GraphClient(client_id)
+    graph = GraphClient(client_id, account_hint=account_hint)
 
     # Optional date floor
     since_date: str | None = config.get("since_date") or None
@@ -110,6 +114,7 @@ def run(config: dict, data_dir: str) -> None:
                         root_folder_name=root_folder_name,
                         source_name=source_name,
                         source_document_id=source_id,
+                        account_hint=upload_account_hint,
                     )
                     if status == "invoice":
                         invoices_saved += 1

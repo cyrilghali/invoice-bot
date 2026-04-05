@@ -84,15 +84,15 @@ def build_filename(
 # Graph API helpers
 # ---------------------------------------------------------------------------
 
-def _headers(client_id: str) -> dict:
-    token = get_access_token(client_id)
+def _headers(client_id: str, account_hint: str | None = None) -> dict:
+    token = get_access_token(client_id, account_hint=account_hint)
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
 
-def _get_or_create_folder(client_id: str, parent_path: str, name: str) -> str:
+def _get_or_create_folder(client_id: str, parent_path: str, name: str, account_hint: str | None = None) -> str:
     """
     Return the OneDrive item ID of a folder named `name` under `parent_path`.
     Creates it if it does not exist.
@@ -106,7 +106,7 @@ def _get_or_create_folder(client_id: str, parent_path: str, name: str) -> str:
     """
     # Try to resolve the folder by path directly (404 = does not exist yet)
     get_url = f"{GRAPH_BASE}{parent_path}:/{name}?$select=id,name,folder"
-    resp = requests.get(get_url, headers=_headers(client_id), timeout=30)
+    resp = requests.get(get_url, headers=_headers(client_id, account_hint), timeout=30)
 
     if resp.status_code == 200:
         item = resp.json()
@@ -126,13 +126,13 @@ def _get_or_create_folder(client_id: str, parent_path: str, name: str) -> str:
     }
     resp = requests.post(
         create_url,
-        headers=_headers(client_id),
+        headers=_headers(client_id, account_hint),
         json=payload,
         timeout=30,
     )
     # 409 Conflict = already exists (race condition) — re-fetch by path
     if resp.status_code == 409:
-        resp2 = requests.get(get_url, headers=_headers(client_id), timeout=30)
+        resp2 = requests.get(get_url, headers=_headers(client_id, account_hint), timeout=30)
         resp2.raise_for_status()
         return resp2.json()["id"]
     resp.raise_for_status()
@@ -143,7 +143,7 @@ def _get_or_create_folder(client_id: str, parent_path: str, name: str) -> str:
 
 def _get_invoice_folder_id(
     client_id: str, root_folder_id: str, year: int, month: int,
-    supplier_label: str | None = None,
+    supplier_label: str | None = None, account_hint: str | None = None,
 ) -> str:
     """
     Ensure ROOT/{YYYY}/{MM}/{supplier} exists and return the deepest folder ID.
@@ -152,24 +152,24 @@ def _get_invoice_folder_id(
     If supplier_label is None, returns the month folder (used by _a_verifier).
     """
     year_id = _get_or_create_folder(
-        client_id, f"/me/drive/items/{root_folder_id}", str(year)
+        client_id, f"/me/drive/items/{root_folder_id}", str(year), account_hint=account_hint
     )
     month_id = _get_or_create_folder(
-        client_id, f"/me/drive/items/{year_id}", f"{month:02d}"
+        client_id, f"/me/drive/items/{year_id}", f"{month:02d}", account_hint=account_hint
     )
     if supplier_label:
         return _get_or_create_folder(
-            client_id, f"/me/drive/items/{month_id}", supplier_label
+            client_id, f"/me/drive/items/{month_id}", supplier_label, account_hint=account_hint
         )
     return month_id
 
 
-def _get_or_create_root_folder(client_id: str, folder_name: str) -> str:
+def _get_or_create_root_folder(client_id: str, folder_name: str, account_hint: str | None = None) -> str:
     """
     Return the ID of the root folder (e.g. 'Factures-GHALI') at the top of OneDrive.
     Creates it if absent.
     """
-    return _get_or_create_folder(client_id, "/me/drive/root", folder_name)
+    return _get_or_create_folder(client_id, "/me/drive/root", folder_name, account_hint=account_hint)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +188,7 @@ def _upload_to_folder(
     file_bytes: bytes,
     content_type: str,
     log_label: str,
+    account_hint: str | None = None,
 ) -> tuple[str, str]:
     """
     Upload a file to a specific OneDrive folder, choosing simple PUT or
@@ -198,7 +199,7 @@ def _upload_to_folder(
     """
     # Idempotency — skip if already uploaded (resolve by path)
     check_url = f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}?$select=id,webUrl"
-    resp = requests.get(check_url, headers=_headers(client_id), timeout=30)
+    resp = requests.get(check_url, headers=_headers(client_id, account_hint), timeout=30)
     if resp.status_code == 200:
         existing = resp.json()
         logger.info("File already exists in %s (skipping upload): %s", log_label, filename)
@@ -207,8 +208,8 @@ def _upload_to_folder(
         resp.raise_for_status()
 
     if len(file_bytes) <= _SIMPLE_UPLOAD_LIMIT:
-        return _simple_upload(client_id, folder_id, filename, file_bytes, content_type)
-    return _chunked_upload(client_id, folder_id, filename, file_bytes, content_type)
+        return _simple_upload(client_id, folder_id, filename, file_bytes, content_type, account_hint=account_hint)
+    return _chunked_upload(client_id, folder_id, filename, file_bytes, content_type, account_hint=account_hint)
 
 
 def _simple_upload(
@@ -217,10 +218,11 @@ def _simple_upload(
     filename: str,
     file_bytes: bytes,
     content_type: str,
+    account_hint: str | None = None,
 ) -> tuple[str, str]:
     """Simple PUT upload for files <= 4 MB."""
     upload_url = f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}:/content"
-    token = get_access_token(client_id)
+    token = get_access_token(client_id, account_hint=account_hint)
     resp = requests.put(
         upload_url,
         headers={
@@ -241,11 +243,12 @@ def _chunked_upload(
     filename: str,
     file_bytes: bytes,
     content_type: str,
+    account_hint: str | None = None,
 ) -> tuple[str, str]:
     """Chunked upload session for files > 4 MB (up to 250 MB)."""
     # 1. Create upload session
     session_url = f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}:/createUploadSession"
-    token = get_access_token(client_id)
+    token = get_access_token(client_id, account_hint=account_hint)
     resp = requests.post(
         session_url,
         headers={
@@ -311,6 +314,7 @@ def _upload_file(
     invoice_date: str | None = None,
     supplier: str | None = None,
     review: bool = False,
+    account_hint: str | None = None,
 ) -> tuple[str, str]:
     """
     Upload a single attachment to OneDrive.
@@ -321,18 +325,18 @@ def _upload_file(
     Returns:
         (onedrive_file_id, onedrive_web_url)
     """
-    root_id = _get_or_create_root_folder(client_id, root_folder_name)
+    root_id = _get_or_create_root_folder(client_id, root_folder_name, account_hint=account_hint)
 
     if review:
-        month_folder_id = _get_invoice_folder_id(client_id, root_id, year, month)
+        month_folder_id = _get_invoice_folder_id(client_id, root_id, year, month, account_hint=account_hint)
         folder_id = _get_or_create_folder(
-            client_id, f"/me/drive/items/{month_folder_id}", REVIEW_SUBFOLDER
+            client_id, f"/me/drive/items/{month_folder_id}", REVIEW_SUBFOLDER, account_hint=account_hint
         )
         dest_label = f"{root_folder_name}/{year}/{month:02d}/_a_verifier/"
         log_label = "_a_verifier"
     else:
         supplier_label = (_supplier_to_label(supplier) if supplier else None) or sender_to_label(sender)
-        folder_id = _get_invoice_folder_id(client_id, root_id, year, month, supplier_label)
+        folder_id = _get_invoice_folder_id(client_id, root_id, year, month, supplier_label, account_hint=account_hint)
         dest_label = f"{root_folder_name}/{year}/{month:02d}/{supplier_label or '(root)'}/"
         log_label = "OneDrive"
 
@@ -346,7 +350,7 @@ def _upload_file(
 
     file_id, web_url = _upload_to_folder(
         client_id, folder_id, filename, attachment_bytes, content_type,
-        log_label=log_label,
+        log_label=log_label, account_hint=account_hint,
     )
     logger.info("Upload complete: file=%r id=%s url=%s", filename, file_id, web_url)
     return file_id, web_url
@@ -364,6 +368,7 @@ def upload_attachment(
     month: int,
     invoice_date: str | None = None,
     supplier: str | None = None,
+    account_hint: str | None = None,
 ) -> tuple[str, str]:
     """Upload a single attachment to the correct OneDrive supplier folder.
 
@@ -373,6 +378,7 @@ def upload_attachment(
         client_id, root_folder_name, attachment_name, attachment_bytes,
         content_type, sender, received_at, year, month,
         invoice_date=invoice_date, supplier=supplier, review=False,
+        account_hint=account_hint,
     )
 
 
@@ -388,6 +394,7 @@ def upload_to_review(
     month: int,
     invoice_date: str | None = None,
     supplier: str | None = None,
+    account_hint: str | None = None,
 ) -> tuple[str, str]:
     """Upload an attachment to the _a_verifier/ subfolder.
 
@@ -397,5 +404,6 @@ def upload_to_review(
         client_id, root_folder_name, attachment_name, attachment_bytes,
         content_type, sender, received_at, year, month,
         invoice_date=invoice_date, supplier=supplier, review=True,
+        account_hint=account_hint,
     )
 
