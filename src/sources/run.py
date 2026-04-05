@@ -67,10 +67,10 @@ def main() -> None:
     if "classifier" in config and "classifier" not in instance_config:
         instance_config["classifier"] = config["classifier"]
 
-    # Inject client_id from microsoft config (sources need it for Graph API)
+    # Inject client_id from microsoft config or AZURE_CLIENT_ID env var
     if "client_id" not in instance_config:
         ms_config = config.get("microsoft", {})
-        client_id = ms_config.get("client_id")
+        client_id = ms_config.get("client_id") or os.environ.get("AZURE_CLIENT_ID")
         if client_id:
             instance_config["client_id"] = client_id
 

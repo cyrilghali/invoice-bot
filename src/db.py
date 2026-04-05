@@ -91,7 +91,7 @@ def init_db(data_dir: str) -> None:
             ("amount_ht", "REAL"), ("amount_ttc", "REAL"),
             ("amount_tva", "REAL"), ("currency", "TEXT"),
             ("source_name", "TEXT"), ("source_document_id", "TEXT"),
-            ("content_hash", "TEXT"),
+            ("content_hash", "TEXT"), ("entity", "TEXT"),
         ]
         for col_name, col_type in migrations:
             if col_name not in existing_cols:
@@ -203,6 +203,7 @@ def save_invoice(
     drive_web_link: str | None = None,
     invoice_date: str | None = None,
     supplier: str | None = None,
+    entity: str | None = None,
     amount_ht: float | None = None,
     amount_ttc: float | None = None,
     amount_tva: float | None = None,
@@ -216,8 +217,8 @@ def save_invoice(
                 (email_id, source_name, source_document_id, filename,
                  drive_file_id, drive_web_link,
                  sender, received_at, year, month, invoice_date, supplier,
-                 amount_ht, amount_ttc, amount_tva, currency, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 entity, amount_ht, amount_ttc, amount_tva, currency, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 email_id or source_document_id or "",
@@ -232,6 +233,7 @@ def save_invoice(
                 month,
                 invoice_date,
                 supplier,
+                entity,
                 amount_ht,
                 amount_ttc,
                 amount_tva,
@@ -241,9 +243,9 @@ def save_invoice(
         )
         conn.commit()
         logger.info(
-            "Invoice saved: id=%d filename=%r year=%d month=%d supplier=%r "
+            "Invoice saved: id=%d filename=%r year=%d month=%d supplier=%r entity=%r "
             "invoice_date=%r amount_ht=%s amount_ttc=%s currency=%r source=%s",
-            cursor.lastrowid, filename, year, month, supplier,
+            cursor.lastrowid, filename, year, month, supplier, entity,
             invoice_date, amount_ht, amount_ttc, currency, source_name,
         )
 

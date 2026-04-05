@@ -35,6 +35,7 @@ INVOICE_MIME_TYPES = {
     "application/vnd.ms-excel",  # xls
     "application/zip",
     "application/x-zip-compressed",
+    "text/csv",
 }
 
 # Fallback extension map for download filename guessing
@@ -48,6 +49,7 @@ _MIME_TO_EXT = {
     "application/vnd.ms-excel": ".xls",
     "application/zip": ".zip",
     "application/x-zip-compressed": ".zip",
+    "text/csv": ".csv",
 }
 
 
@@ -64,6 +66,7 @@ def _mime_from_extension(filename: str) -> str | None:
         "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "xls": "application/vnd.ms-excel",
         "zip": "application/zip",
+        "csv": "text/csv",
     }.get(ext)
 
 

@@ -19,7 +19,7 @@ from utils import normalize_content_type
 logger = logging.getLogger(__name__)
 
 # Supported member types inside a ZIP archive
-_ZIP_SUPPORTED_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".tiff", ".xlsx", ".xls")
+_ZIP_SUPPORTED_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".tiff", ".xlsx", ".xls", ".csv")
 
 
 def _unpack_zip(attachment: Attachment) -> list[Attachment]:
@@ -56,6 +56,7 @@ def _unpack_zip(attachment: Attachment) -> list[Attachment]:
                     "tiff": "image/tiff",
                     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     "xls": "application/vnd.ms-excel",
+                    "csv": "text/csv",
                 }
                 content_type = ct_map.get(ext, "application/octet-stream")
                 members.append(Attachment(
@@ -225,6 +226,7 @@ def process_attachment(
             drive_web_link=drive_web_link,
             invoice_date=invoice_date,
             supplier=doc_supplier,
+            entity=entity,
             amount_ht=amount_ht,
             amount_ttc=amount_ttc,
             amount_tva=amount_tva,

@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import tempfile
+from datetime import date
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -125,6 +126,25 @@ def _extract_xlsx_text(data: bytes) -> str:
         return "\n".join(lines)[:MAX_TEXT_CHARS]
     except Exception as e:
         logger.warning("XLSX text extraction failed: %s", e)
+        return ""
+
+
+def _extract_csv_text(data: bytes) -> str:
+    """Extract text from a CSV file (first 100 rows)."""
+    try:
+        import csv
+        text = data.decode("utf-8", errors="replace")
+        reader = csv.reader(io.StringIO(text))
+        lines = []
+        for i, row in enumerate(reader):
+            if i >= 100:
+                break
+            row_text = " ".join(cell for cell in row if cell.strip())
+            if row_text.strip():
+                lines.append(row_text)
+        return "\n".join(lines)[:MAX_TEXT_CHARS]
+    except Exception as e:
+        logger.warning("CSV text extraction failed: %s", e)
         return ""
 
 
@@ -272,6 +292,16 @@ def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyR
         if invoice_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", invoice_date):
             invoice_date = None
 
+        # Sanity-check year: OCR on low-quality scans can misread digits
+        # (e.g. 2028 instead of 2026). An invoice can't be >1 year in the future.
+        if invoice_date:
+            year = int(invoice_date[:4])
+            current_year = date.today().year
+            if year > current_year + 1:
+                logger.warning("Invoice date %s has implausible year %d — clamping to %d",
+                               invoice_date, year, current_year)
+                invoice_date = f"{current_year}{invoice_date[4:]}"
+
         # supplier
         raw_supplier = data.get("supplier")
         supplier: str | None = None
@@ -314,6 +344,7 @@ _PDF_TYPES = {"application/pdf", "application/x-pdf"}
 _IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/tiff"}
 _XLSX_TYPES = {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                "application/vnd.ms-excel"}
+_CSV_TYPES = {"text/csv", "text/comma-separated-values"}
 
 
 def is_invoice(
@@ -363,6 +394,10 @@ def is_invoice(
 
         elif ct in _XLSX_TYPES or name_lower.endswith((".xlsx", ".xls")):
             text = _extract_xlsx_text(data)
+            result = _classify_text(text, model, hint_supplier, owner_names)
+
+        elif ct in _CSV_TYPES or name_lower.endswith(".csv"):
+            text = _extract_csv_text(data)
             result = _classify_text(text, model, hint_supplier, owner_names)
 
         else:

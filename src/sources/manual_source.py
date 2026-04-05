@@ -42,6 +42,7 @@ SUPPORTED_TYPES = {
     "application/vnd.ms-excel",
     "application/zip",
     "application/x-zip-compressed",
+    "text/csv",
 }
 
 
