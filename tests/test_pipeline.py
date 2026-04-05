@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from pipeline import _unpack_zip, process_attachment
-from poller import Attachment, Email
+from poller import Attachment
 
 
 # ---------------------------------------------------------------------------
@@ -97,26 +97,24 @@ class TestUnpackZip:
 # ---------------------------------------------------------------------------
 
 class TestProcessAttachment:
-    def _make_email(self):
-        return Email(
-            email_id="e1",
-            sender="billing@example.com",
-            subject="Facture",
-            received_at="2025-03-15T10:00:00Z",
-        )
-
     @patch("pipeline.db")
     @patch("pipeline.upload_attachment", return_value=("file-id", "https://link"))
     @patch("pipeline.build_filename", return_value="2025-03-15_example_inv.pdf")
     @patch("pipeline.is_invoice", return_value=("invoice", "2025-03-15", "Acme", 100.0, 120.0, 20.0, "EUR"))
     def test_invoice_uploaded_and_saved(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
-        email = self._make_email()
 
-        status = process_attachment(att, email, 2025, 3, {}, "/data", "cid", "Root")
+        status = process_attachment(
+            att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
+            year=2025, month=3, config={}, data_dir="/data", client_id="cid",
+            root_folder_name="Root", source_name="email", source_document_id="e1",
+        )
         assert status == "invoice"
         mock_upload.assert_called_once()
         mock_db.save_invoice.assert_called_once()
+        # Verify source fields passed to save_invoice
+        call_kwargs = mock_db.save_invoice.call_args
+        assert call_kwargs.kwargs.get("source_name") or call_kwargs[1].get("source_name") == "email"
 
     @patch("pipeline.db")
     @patch("pipeline.upload_to_review", return_value=("file-id", "https://link"))
@@ -124,11 +122,14 @@ class TestProcessAttachment:
     @patch("pipeline.is_invoice", return_value=("rejected", None, None, None, None, None, None))
     def test_rejected_not_uploaded(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="contract.pdf", content_type="application/pdf", content_bytes=b"%PDF")
-        email = self._make_email()
 
-        status = process_attachment(att, email, 2025, 3, {}, "/data", "cid", "Root")
+        status = process_attachment(
+            att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
+            year=2025, month=3, config={}, data_dir="/data", client_id="cid",
+            root_folder_name="Root",
+        )
         assert status == "rejected"
-        mock_upload.assert_not_called()  # rejected = silently dropped
+        mock_upload.assert_not_called()
         mock_db.save_invoice.assert_not_called()
 
     @patch("pipeline.db")
@@ -137,9 +138,12 @@ class TestProcessAttachment:
     @patch("pipeline.is_invoice", return_value=("review", None, None, None, None, None, None))
     def test_review_uploaded_to_review(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="maybe.pdf", content_type="application/pdf", content_bytes=b"%PDF")
-        email = self._make_email()
 
-        status = process_attachment(att, email, 2025, 3, {}, "/data", "cid", "Root")
+        status = process_attachment(
+            att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
+            year=2025, month=3, config={}, data_dir="/data", client_id="cid",
+            root_folder_name="Root",
+        )
         assert status == "review"
         mock_upload.assert_called_once()
 
@@ -149,12 +153,14 @@ class TestProcessAttachment:
     @patch("pipeline.is_invoice", return_value=("invoice", "2025-01-20", "Acme", 100.0, 120.0, 20.0, "EUR"))
     def test_invoice_date_overrides_year_month(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
-        email = self._make_email()
 
         # email received in March, but invoice date is January
-        status = process_attachment(att, email, 2025, 3, {}, "/data", "cid", "Root")
+        status = process_attachment(
+            att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
+            year=2025, month=3, config={}, data_dir="/data", client_id="cid",
+            root_folder_name="Root",
+        )
         assert status == "invoice"
-        # Verify upload was called with January (year=2025, month=1)
         call_kwargs = mock_upload.call_args
         assert call_kwargs.kwargs.get("year") or call_kwargs[1].get("year") == 2025
         assert call_kwargs.kwargs.get("month") or call_kwargs[1].get("month") == 1
@@ -175,9 +181,12 @@ class TestProcessAttachment:
             ("contract.pdf", b"%PDF-data"),
         )
         att = Attachment(name="bundle.zip", content_type="application/zip", content_bytes=zip_bytes)
-        email = self._make_email()
 
-        status = process_attachment(att, email, 2025, 3, {}, "/data", "cid", "Root")
+        status = process_attachment(
+            att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
+            year=2025, month=3, config={}, data_dir="/data", client_id="cid",
+            root_folder_name="Root",
+        )
         assert status == "invoice"  # at least one member was an invoice
         assert mock_classify.call_count == 2
 
@@ -185,9 +194,12 @@ class TestProcessAttachment:
     def test_empty_zip_returns_rejected(self, mock_classify):
         zip_bytes = _make_zip()  # empty archive
         att = Attachment(name="empty.zip", content_type="application/zip", content_bytes=zip_bytes)
-        email = self._make_email()
 
-        status = process_attachment(att, email, 2025, 3, {}, "/data", "cid", "Root")
+        status = process_attachment(
+            att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
+            year=2025, month=3, config={}, data_dir="/data", client_id="cid",
+            root_folder_name="Root",
+        )
         assert status == "rejected"
         mock_classify.assert_not_called()
 
@@ -197,14 +209,16 @@ class TestProcessAttachment:
     @patch("pipeline.is_invoice", return_value=("invoice", None, None, None, None, None, None))
     def test_sender_supplier_hint_used(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
-        email = self._make_email()
         config = {
             "invoices": {
                 "sender_suppliers": {"billing@example.com": "Example Corp"},
             }
         }
 
-        process_attachment(att, email, 2025, 3, config, "/data", "cid", "Root")
-        # Verify hint_supplier was passed to is_invoice
+        process_attachment(
+            att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
+            year=2025, month=3, config=config, data_dir="/data", client_id="cid",
+            root_folder_name="Root",
+        )
         call_kwargs = mock_classify.call_args
         assert call_kwargs.kwargs.get("hint_supplier") == "Example Corp"

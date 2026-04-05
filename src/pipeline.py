@@ -12,7 +12,7 @@ from datetime import datetime
 import db
 from classifier import is_invoice
 from onedrive_uploader import build_filename, upload_attachment, upload_to_review
-from poller import Attachment, Email
+from poller import Attachment
 from utils import normalize_content_type
 
 logger = logging.getLogger(__name__)
@@ -69,13 +69,16 @@ def _unpack_zip(attachment: Attachment) -> list[Attachment]:
 
 def process_attachment(
     attachment: Attachment,
-    email: Email,
+    sender: str,
+    received_at: str,
     year: int,
     month: int,
     config: dict,
     data_dir: str,
     client_id: str,
     root_folder_name: str,
+    source_name: str | None = None,
+    source_document_id: str | None = None,
 ) -> str:
     """
     Classify a single attachment and upload it to the appropriate OneDrive folder.
@@ -101,13 +104,16 @@ def process_attachment(
             try:
                 member_status = process_attachment(
                     attachment=member,
-                    email=email,
+                    sender=sender,
+                    received_at=received_at,
                     year=year,
                     month=month,
                     config=config,
                     data_dir=data_dir,
                     client_id=client_id,
                     root_folder_name=root_folder_name,
+                    source_name=source_name,
+                    source_document_id=source_document_id,
                 )
                 if member_status == "invoice":
                     any_invoice = True
@@ -121,11 +127,11 @@ def process_attachment(
         attachment.name,
         attachment.content_type.split(";")[0].strip(),
         len(attachment.content_bytes),
-        email.sender,
+        sender,
     )
 
     # Look up canonical supplier hint for this sender
-    sender_key = email.sender.lower().strip()
+    sender_key = sender.lower().strip()
     sender_suppliers: dict[str, str] = (config.get("invoices") or {}).get("sender_suppliers") or {}
     hint_supplier: str | None = sender_suppliers.get(sender_key)
 
@@ -134,7 +140,6 @@ def process_attachment(
     )
 
     # Canonical supplier from config takes priority over AI extraction
-    # (avoids "La Favola" when the doc mentions the buyer, or inconsistent AI names)
     filename_supplier: str | None = hint_supplier or doc_supplier
 
     # Derive folder year/month from invoice date when available
@@ -145,7 +150,7 @@ def process_attachment(
             inv_year, inv_month = inv_dt.year, inv_dt.month
             logger.info(
                 "Using invoice date %s for %s (received %s)",
-                invoice_date, attachment.name, email.received_at,
+                invoice_date, attachment.name, received_at,
             )
         except ValueError:
             logger.warning(
@@ -155,7 +160,7 @@ def process_attachment(
             invoice_date = None
 
     stored_filename = build_filename(
-        email.received_at, email.sender, attachment.name,
+        received_at, sender, attachment.name,
         invoice_date=invoice_date,
         supplier=filename_supplier,
     )
@@ -173,8 +178,8 @@ def process_attachment(
             attachment_name=attachment.name,
             attachment_bytes=attachment.content_bytes,
             content_type=attachment.content_type,
-            sender=email.sender,
-            received_at=email.received_at,
+            sender=sender,
+            received_at=received_at,
             year=inv_year,
             month=inv_month,
             invoice_date=invoice_date,
@@ -182,12 +187,13 @@ def process_attachment(
         )
         db.save_invoice(
             data_dir,
-            email_id=email.email_id,
             filename=stored_filename,
-            sender=email.sender,
-            received_at=email.received_at,
+            sender=sender,
+            received_at=received_at,
             year=inv_year,
             month=inv_month,
+            source_name=source_name,
+            source_document_id=source_document_id,
             drive_file_id=drive_file_id,
             drive_web_link=drive_web_link,
             invoice_date=invoice_date,
@@ -204,7 +210,7 @@ def process_attachment(
     elif status == "review":
         logger.info(
             "Uncertain — routing to _a_verifier: file=%r from=%s folder=%s/%d/%02d/_a_verifier",
-            attachment.name, email.sender, root_folder_name, inv_year, inv_month,
+            attachment.name, sender, root_folder_name, inv_year, inv_month,
         )
         _, review_web_link = upload_to_review(
             client_id=client_id,
@@ -212,8 +218,8 @@ def process_attachment(
             attachment_name=attachment.name,
             attachment_bytes=attachment.content_bytes,
             content_type=attachment.content_type,
-            sender=email.sender,
-            received_at=email.received_at,
+            sender=sender,
+            received_at=received_at,
             year=inv_year,
             month=inv_month,
             invoice_date=invoice_date,
@@ -221,5 +227,5 @@ def process_attachment(
         )
     else:
         # rejected — confidently not an invoice (CGU, CGV, logos, etc.) — skip entirely
-        logger.info("Rejected (not an invoice): file=%r from=%s — not uploaded", attachment.name, email.sender)
+        logger.info("Rejected (not an invoice): file=%r from=%s — not uploaded", attachment.name, sender)
     return status
