@@ -16,6 +16,7 @@ def get_connection(data_dir: str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -33,17 +34,21 @@ def init_db(data_dir: str) -> None:
     """Create tables if they don't exist, and run migrations for existing DBs."""
     with _connect(data_dir) as conn:
         conn.executescript("""
-            CREATE TABLE IF NOT EXISTS processed_emails (
-                email_id        TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS processed_documents (
+                source_name     TEXT NOT NULL,
+                source_id       TEXT NOT NULL,
                 processed_at    TEXT NOT NULL,
                 sender          TEXT NOT NULL,
                 subject         TEXT,
-                received_at     TEXT
+                received_at     TEXT,
+                PRIMARY KEY (source_name, source_id)
             );
 
             CREATE TABLE IF NOT EXISTS invoices (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                email_id        TEXT NOT NULL,
+                email_id        TEXT,
+                source_name     TEXT,
+                source_document_id TEXT,
                 filename        TEXT NOT NULL,
                 drive_file_id   TEXT,
                 drive_web_link  TEXT,
@@ -51,8 +56,7 @@ def init_db(data_dir: str) -> None:
                 received_at     TEXT NOT NULL,
                 year            INTEGER NOT NULL,
                 month           INTEGER NOT NULL,
-                reported        INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (email_id) REFERENCES processed_emails(email_id)
+                reported        INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS monthly_reports (
@@ -62,10 +66,22 @@ def init_db(data_dir: str) -> None:
                 sent_at     TEXT NOT NULL,
                 UNIQUE(year, month)
             );
+
+            CREATE TABLE IF NOT EXISTS source_runs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_name     TEXT NOT NULL,
+                started_at      TEXT NOT NULL,
+                finished_at     TEXT,
+                status          TEXT NOT NULL DEFAULT 'running',
+                documents_found INTEGER DEFAULT 0,
+                documents_new   INTEGER DEFAULT 0,
+                invoices_saved  INTEGER DEFAULT 0,
+                error_message   TEXT
+            );
         """)
         conn.commit()
 
-        # Migrations: add new columns if they don't exist yet
+        # Migrations: add new columns to invoices if they don't exist yet
         existing_cols = {
             row[1]
             for row in conn.execute("PRAGMA table_info(invoices)").fetchall()
@@ -74,6 +90,7 @@ def init_db(data_dir: str) -> None:
             ("invoice_date", "TEXT"), ("supplier", "TEXT"),
             ("amount_ht", "REAL"), ("amount_ttc", "REAL"),
             ("amount_tva", "REAL"), ("currency", "TEXT"),
+            ("source_name", "TEXT"), ("source_document_id", "TEXT"),
         ]
         for col_name, col_type in migrations:
             if col_name not in existing_cols:
@@ -81,20 +98,50 @@ def init_db(data_dir: str) -> None:
                 conn.commit()
                 logger.info("Migration: added %s column to invoices table", col_name)
 
+        # Migrate processed_emails → processed_documents (one-time)
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "processed_emails" in tables:
+            conn.execute("""
+                INSERT OR IGNORE INTO processed_documents
+                    (source_name, source_id, processed_at, sender, subject, received_at)
+                SELECT 'email', email_id, processed_at, sender, subject, received_at
+                FROM processed_emails
+            """)
+            # Backfill source_name/source_document_id on existing invoices
+            conn.execute("""
+                UPDATE invoices
+                SET source_name = 'email', source_document_id = email_id
+                WHERE source_name IS NULL AND email_id IS NOT NULL
+            """)
+            conn.execute("DROP TABLE processed_emails")
+            conn.commit()
+            logger.info("Migration: migrated processed_emails → processed_documents and dropped old table")
+
         logger.info("Database initialized at %s", Path(data_dir) / "invoices.db")
 
 
-def is_email_processed(data_dir: str, email_id: str) -> bool:
+# ---------------------------------------------------------------------------
+# Document processing deduplication
+# ---------------------------------------------------------------------------
+
+def is_document_processed(data_dir: str, source_name: str, source_id: str) -> bool:
     with _connect(data_dir) as conn:
         row = conn.execute(
-            "SELECT 1 FROM processed_emails WHERE email_id = ?", (email_id,)
+            "SELECT 1 FROM processed_documents WHERE source_name = ? AND source_id = ?",
+            (source_name, source_id),
         ).fetchone()
         return row is not None
 
 
-def mark_email_processed(
+def mark_document_processed(
     data_dir: str,
-    email_id: str,
+    source_name: str,
+    source_id: str,
     sender: str,
     subject: str,
     received_at: str,
@@ -102,24 +149,30 @@ def mark_email_processed(
     with _connect(data_dir) as conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO processed_emails
-                (email_id, processed_at, sender, subject, received_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO processed_documents
+                (source_name, source_id, processed_at, sender, subject, received_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (email_id, datetime.now(timezone.utc).isoformat(), sender, subject, received_at),
+            (source_name, source_id, datetime.now(timezone.utc).isoformat(), sender, subject, received_at),
         )
         conn.commit()
-        logger.info("Email marked as processed: id=%s sender=%s subject=%r", email_id, sender, subject)
+        logger.info("Document marked as processed: source=%s id=%s sender=%s", source_name, source_id, sender)
 
+
+# ---------------------------------------------------------------------------
+# Invoice CRUD
+# ---------------------------------------------------------------------------
 
 def save_invoice(
     data_dir: str,
-    email_id: str,
     filename: str,
     sender: str,
     received_at: str,
     year: int,
     month: int,
+    source_name: str | None = None,
+    source_document_id: str | None = None,
+    email_id: str | None = None,
     drive_file_id: str | None = None,
     drive_web_link: str | None = None,
     invoice_date: str | None = None,
@@ -133,13 +186,16 @@ def save_invoice(
         cursor = conn.execute(
             """
             INSERT INTO invoices
-                (email_id, filename, drive_file_id, drive_web_link,
+                (email_id, source_name, source_document_id, filename,
+                 drive_file_id, drive_web_link,
                  sender, received_at, year, month, invoice_date, supplier,
                  amount_ht, amount_ttc, amount_tva, currency)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 email_id,
+                source_name,
+                source_document_id,
                 filename,
                 drive_file_id,
                 drive_web_link,
@@ -158,9 +214,9 @@ def save_invoice(
         conn.commit()
         logger.info(
             "Invoice saved: id=%d filename=%r year=%d month=%d supplier=%r "
-            "invoice_date=%r amount_ht=%s amount_ttc=%s currency=%r",
+            "invoice_date=%r amount_ht=%s amount_ttc=%s currency=%r source=%s",
             cursor.lastrowid, filename, year, month, supplier,
-            invoice_date, amount_ht, amount_ttc, currency,
+            invoice_date, amount_ht, amount_ttc, currency, source_name,
         )
 
 
@@ -190,6 +246,10 @@ def mark_invoices_reported(data_dir: str, invoice_ids: list[int]) -> None:
         logger.info("Marked %d invoice(s) as reported.", len(invoice_ids))
 
 
+# ---------------------------------------------------------------------------
+# Monthly report tracking
+# ---------------------------------------------------------------------------
+
 def save_monthly_report(data_dir: str, year: int, month: int) -> None:
     with _connect(data_dir) as conn:
         conn.execute(
@@ -206,3 +266,47 @@ def has_monthly_report_been_sent(data_dir: str, year: int, month: int) -> bool:
             (year, month),
         ).fetchone()
         return row is not None
+
+
+# ---------------------------------------------------------------------------
+# Source run tracking
+# ---------------------------------------------------------------------------
+
+def save_source_run(
+    data_dir: str,
+    source_name: str,
+    started_at: str,
+    finished_at: str,
+    status: str,
+    documents_found: int = 0,
+    documents_new: int = 0,
+    invoices_saved: int = 0,
+    error_message: str | None = None,
+) -> None:
+    with _connect(data_dir) as conn:
+        conn.execute(
+            """
+            INSERT INTO source_runs
+                (source_name, started_at, finished_at, status,
+                 documents_found, documents_new, invoices_saved, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (source_name, started_at, finished_at, status,
+             documents_found, documents_new, invoices_saved, error_message),
+        )
+        conn.commit()
+
+
+def get_recent_runs(data_dir: str, source_name: str | None = None, limit: int = 20) -> list[dict]:
+    with _connect(data_dir) as conn:
+        if source_name:
+            rows = conn.execute(
+                "SELECT * FROM source_runs WHERE source_name = ? ORDER BY started_at DESC LIMIT ?",
+                (source_name, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM source_runs ORDER BY started_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
