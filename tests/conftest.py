@@ -32,21 +32,27 @@ def sample_config():
         "microsoft": {"client_id": "test-client-id-000"},
         "onedrive": {"folder_name": "Factures-TEST"},
         "classifier": {
-            "api_key": "sk-ant-test-key",
             "confidence_threshold": 0.5,
             "owner_business_names": ["My Own Company"],
         },
         "invoices": {
-            "whitelisted_senders": ["billing@example.com"],
-            "subject_keywords": ["facture", "invoice"],
             "sender_suppliers": {"billing@example.com": "Example Corp"},
         },
+        "sources": {
+            "main_inbox": {
+                "module": "email_source",
+                "interval_minutes": 10,
+                "client_id": "test-client-id-000",
+                "onedrive_folder_name": "Factures-TEST",
+                "whitelisted_senders": ["billing@example.com"],
+                "subject_keywords": ["facture", "invoice"],
+                "link_keywords": ["download", "facture"],
+            },
+        },
         "schedule": {
-            "poll_interval_minutes": 10,
             "report_day_of_month": 1,
             "report_hour": 8,
         },
-        "link_detection": {"keywords": ["download", "facture"]},
         "logging": {"log_level": "DEBUG"},
     }
 

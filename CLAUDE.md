@@ -1,6 +1,6 @@
 # Invoice Bot
 
-Automated invoice collection bot that polls an Outlook/Hotmail inbox, classifies attachments using Claude AI, uploads invoices to OneDrive organized by year/month, and generates monthly Excel summaries.
+Automated invoice collection bot with pluggable sources. Each source (email inbox, web scraper, API) fetches documents and runs them through a shared classify → upload → DB pipeline. Generates monthly Excel summaries.
 
 ## Running
 
@@ -12,6 +12,9 @@ journalctl --user -u invoice-bot -f   # live logs
 
 # Development — foreground
 python3 src/main.py
+
+# Run a single source externally (for heavy scrapers via systemd timer/cron)
+python3 -m sources.run <instance_name>
 ```
 
 ### First-time setup
@@ -47,26 +50,45 @@ python3 -m pytest tests/test_classifier.py  # single file
 
 ```
 APScheduler (BlockingScheduler)
-├── poll_inbox()  — every N minutes
-│   ├── poller.py      → fetches emails via Microsoft Graph API
-│   ├── classifier.py  → classifies via `claude -p` CLI (Opus model)
-│   ├── pipeline.py    → routes attachments based on classification
-│   └── onedrive_uploader.py → uploads to OneDrive
+├── source auto-discovery from config.yaml
+│   ├── sources/email_source.py  — polls inbox via Microsoft Graph API
+│   ├── sources/<custom>.py      — any custom source (scraper, API, etc.)
+│   │   Each source calls directly:
+│   │   ├── classifier.py  → classifies via `claude -p` CLI (Opus model)
+│   │   ├── pipeline.py    → routes attachments based on classification
+│   │   ├── onedrive_uploader.py → uploads to OneDrive
+│   │   └── db.py          → dedup + invoice tracking
+│   └── sources/run.py     — CLI entry point for external triggers
 └── send_report()  — 1st of each month
     ├── db.py            → queries unreported invoices
     └── excel_exporter.py → builds Excel summary
 ```
 
+Sources with `interval_minutes` in config are scheduled by APScheduler.
+Sources without it are triggered externally via `python -m sources.run <name>`.
+Multiple instances of the same source module are supported (e.g. two email inboxes).
+
 ## Key files
 
-- `src/main.py` — entry point, scheduler setup
-- `src/classifier.py` — Claude CLI classification (uses `claude -p --model opus --bare`)
-- `src/pipeline.py` — attachment processing and routing
-- `src/poller.py` — Microsoft Graph inbox polling
+- `src/main.py` — entry point, source auto-discovery, scheduler setup
+- `src/sources/email_source.py` — email inbox source (Microsoft Graph)
+- `src/sources/run.py` — CLI entry point for externally triggered sources
+- `src/classifier.py` — Claude CLI classification (uses `claude -p --model opus`)
+- `src/pipeline.py` — attachment classification and routing
+- `src/poller.py` — Microsoft Graph API client and email dataclasses
+- `src/db.py` — SQLite: dedup (processed_documents), invoices, source_runs
 - `src/utils.py` — shared config loading, logging, path defaults
 - `config.yaml` — application configuration (gitignored)
 - `.env` — secrets: AZURE_CLIENT_ID (gitignored)
 - `data/` — SQLite DB, MSAL token cache, log files (gitignored)
+
+## Adding a new source
+
+1. Create `src/sources/<name>.py` with a `run(config: dict, data_dir: str) -> None` function
+2. Add a config entry under `sources:` in `config.yaml`
+3. The source calls `is_invoice()`, `upload_attachment()`, `save_invoice()` directly
+4. Use `db.is_document_processed()` / `db.mark_document_processed()` for dedup
+5. Call `db.save_source_run()` at the end for observability
 
 ## Conventions
 
@@ -75,3 +97,5 @@ APScheduler (BlockingScheduler)
 - Classification prompts are in French (user's invoices are French)
 - The classifier does NOT use the Anthropic SDK — it shells out to `claude -p` using the user's Claude subscription
 - All paths are configurable via env vars (CONFIG_PATH, DATA_DIR) with repo-relative defaults
+- Source dedup uses `(source_name, source_id)` composite key in `processed_documents` table
+- Each source run is logged to `source_runs` table for observability
