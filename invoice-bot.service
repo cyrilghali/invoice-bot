@@ -1,0 +1,22 @@
+[Unit]
+Description=Invoice Bot — automated invoice classifier and uploader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cyrilghali/repos/invoice-bot
+ExecStart=/usr/bin/python3 src/main.py
+EnvironmentFile=/home/cyrilghali/repos/invoice-bot/.env
+Environment=PATH=/home/cyrilghali/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Auto-restart on any failure, with increasing delay
+Restart=on-failure
+RestartSec=10
+
+# Crash-loop protection: max 5 starts within 3 minutes, then stop trying
+StartLimitBurst=5
+StartLimitIntervalSec=180
+
+[Install]
+WantedBy=default.target

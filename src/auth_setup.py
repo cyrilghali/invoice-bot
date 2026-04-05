@@ -2,9 +2,9 @@
 One-time Microsoft authentication setup using Device Code Flow.
 
 Run this once to authenticate the Outlook/Hotmail account:
-    docker exec -it invoice-bot python src/auth_setup.py
+    python3 src/auth_setup.py
 
-The token cache is saved to /app/data/ms_token_cache.json and reused
+The token cache is saved to data/ms_token_cache.json and reused
 automatically. Tokens are silently refreshed; re-authentication is only
 needed if the refresh token expires (typically after 90 days of inactivity).
 """

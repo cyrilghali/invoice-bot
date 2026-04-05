@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # Default data directory (centralised to avoid repeating the fallback everywhere)
-DEFAULT_DATA_DIR = "/app/data"
+DEFAULT_DATA_DIR = "data"
 
 # French month names (1-indexed; index 0 is empty)
 MONTH_NAMES_FR = [
@@ -28,10 +28,10 @@ LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-def setup_logging(data_dir: str = "/app/data", log_level: str = "INFO") -> None:
+def setup_logging(data_dir: str = "data", log_level: str = "INFO") -> None:
     """
     Configure the root logger with:
-      - StreamHandler  → stdout (Docker console, existing behaviour)
+      - StreamHandler  → stdout (console output)
       - RotatingFileHandler → data/bot.log (5 MB per file, 5 backups)
 
     Call this once at the very start of each entry point (main.py, backfill.py,
@@ -78,9 +78,8 @@ def load_config() -> dict:
 
     Environment variables take precedence over config.yaml values:
       AZURE_CLIENT_ID    -> microsoft.client_id
-      ANTHROPIC_API_KEY  -> classifier.api_key
     """
-    config_path = os.environ.get("CONFIG_PATH", "/app/config.yaml")
+    config_path = os.environ.get("CONFIG_PATH", "config.yaml")
     try:
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
@@ -96,10 +95,6 @@ def load_config() -> dict:
     env_client_id = os.environ.get("AZURE_CLIENT_ID")
     if env_client_id:
         cfg.setdefault("microsoft", {})["client_id"] = env_client_id
-
-    env_api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if env_api_key:
-        cfg.setdefault("classifier", {})["api_key"] = env_api_key
 
     return cfg
 

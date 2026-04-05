@@ -28,7 +28,7 @@ class TestConstants:
         assert GRAPH_BASE == "https://graph.microsoft.com/v1.0"
 
     def test_default_data_dir(self):
-        assert DEFAULT_DATA_DIR == "/app/data"
+        assert DEFAULT_DATA_DIR == "data"
 
     def test_month_names_length(self):
         assert len(MONTH_NAMES_FR) == 13
@@ -137,7 +137,6 @@ class TestLoadConfig:
         monkeypatch.setenv("CONFIG_PATH", str(cfg_file))
         # Clear env vars that would overlay
         monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
         cfg = load_config()
         assert cfg["microsoft"]["client_id"] == "abc"
@@ -147,20 +146,9 @@ class TestLoadConfig:
         cfg_file.write_text(yaml.dump({"microsoft": {"client_id": "from-yaml"}}))
         monkeypatch.setenv("CONFIG_PATH", str(cfg_file))
         monkeypatch.setenv("AZURE_CLIENT_ID", "from-env")
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
         cfg = load_config()
         assert cfg["microsoft"]["client_id"] == "from-env"
-
-    def test_env_var_overrides_api_key(self, tmp_path, monkeypatch):
-        cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(yaml.dump({"classifier": {"api_key": "from-yaml"}}))
-        monkeypatch.setenv("CONFIG_PATH", str(cfg_file))
-        monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "from-env")
-
-        cfg = load_config()
-        assert cfg["classifier"]["api_key"] == "from-env"
 
     def test_missing_file_exits(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CONFIG_PATH", str(tmp_path / "nonexistent.yaml"))

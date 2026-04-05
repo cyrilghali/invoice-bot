@@ -77,6 +77,18 @@ class TestEmailDatetime:
         assert dt.year == 2025
         assert dt.month == 6
 
+    def test_internet_message_id_default(self):
+        email = Email(email_id="1", sender="a@b.com", subject="s", received_at="2025-01-01T00:00:00Z")
+        assert email.internet_message_id == ""
+
+    def test_internet_message_id_set(self):
+        email = Email(
+            email_id="1", sender="a@b.com", subject="s",
+            received_at="2025-01-01T00:00:00Z",
+            internet_message_id="<abc123@mail.example.com>",
+        )
+        assert email.internet_message_id == "<abc123@mail.example.com>"
+
 
 # ---------------------------------------------------------------------------
 # _filename_from_response

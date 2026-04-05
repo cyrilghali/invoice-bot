@@ -18,7 +18,7 @@ class TestGetTokenCachePath:
         monkeypatch.delenv("DATA_DIR", raising=False)
         path = get_token_cache_path()
         assert path.endswith("ms_token_cache.json")
-        assert "/app/data/" in path
+        assert "data/" in path
 
     def test_custom_data_dir(self, monkeypatch):
         monkeypatch.setenv("DATA_DIR", "/custom/dir")

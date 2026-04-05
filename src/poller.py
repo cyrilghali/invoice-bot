@@ -51,6 +51,22 @@ _MIME_TO_EXT = {
 }
 
 
+def _mime_from_extension(filename: str) -> str | None:
+    """Guess MIME type from file extension. Returns None if unknown."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return {
+        "pdf": "application/pdf",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "tiff": "image/tiff",
+        "tif": "image/tiff",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xls": "application/vnd.ms-excel",
+        "zip": "application/zip",
+    }.get(ext)
+
+
 # ---------------------------------------------------------------------------
 # HTML link extractor (stdlib html.parser — no extra dependency)
 # ---------------------------------------------------------------------------
@@ -86,6 +102,7 @@ class Email:
     sender: str
     subject: str
     received_at: str  # ISO 8601
+    internet_message_id: str = ""  # RFC 2822 Message-ID — same across all folders
     attachments: list[Attachment] = field(default_factory=list)
 
     @property
@@ -190,16 +207,29 @@ class GraphClient:
                 emails.extend(folder_emails)
                 extra_pages[folder] = folder_pages
 
+        # Deduplicate: the same email can appear in inbox and archive with
+        # different Graph API ids. internetMessageId (RFC 2822) is stable.
+        seen_msg_ids: set[str] = set()
+        unique_emails: list[Email] = []
+        for email in emails:
+            key = email.internet_message_id or email.email_id
+            if key not in seen_msg_ids:
+                seen_msg_ids.add(key)
+                unique_emails.append(email)
+
         total_pages = inbox_pages + sum(extra_pages.values())
         parts = f"inbox={inbox_pages}"
         for f, p in extra_pages.items():
             label = "junk" if f == "junkemail" else f
             parts += f" {label}={p}"
+        dupes = len(emails) - len(unique_emails)
+        if dupes:
+            logger.info("Deduplicated %d cross-folder duplicate(s)", dupes)
         logger.info(
             "Poll complete: pages=%d (%s) emails_with_attachments=%d",
-            total_pages, parts, len(emails),
+            total_pages, parts, len(unique_emails),
         )
-        return emails
+        return unique_emails
 
     def _scan_folder(
         self,
@@ -246,7 +276,7 @@ class GraphClient:
 
         url: str | None = (
             f"{GRAPH_BASE}/me/mailFolders/{folder}/messages"
-            f"?$select=id,sender,subject,receivedDateTime,hasAttachments,body"
+            f"?$select=id,internetMessageId,sender,subject,receivedDateTime,hasAttachments,body"
             f"{filter_clause}"
             f"&$orderby=receivedDateTime desc"
             f"&$top={page_size}"
@@ -297,6 +327,7 @@ class GraphClient:
                     sender=sender_address,
                     subject=subject,
                     received_at=msg["receivedDateTime"],
+                    internet_message_id=msg.get("internetMessageId", ""),
                 )
 
                 # --- Step 1: file attachments (skip inline images / logos) ---
@@ -305,7 +336,8 @@ class GraphClient:
                     raw_attachments = self._fetch_attachments(msg["id"])
                     file_attachments = [
                         a for a in raw_attachments
-                        if a.content_type in INVOICE_MIME_TYPES
+                        if normalize_content_type(a.content_type) in INVOICE_MIME_TYPES
+                        or (_mime_from_extension(a.name) or "") in INVOICE_MIME_TYPES
                     ]
 
                 # --- Step 2: download links from email body ---
@@ -377,10 +409,21 @@ class GraphClient:
                 logger.debug("Skipping inline attachment: %s", att.get("name"))
                 continue
 
-            # Skip unsupported MIME types early (avoid unnecessary downloads)
-            if normalize_content_type(att.get("contentType", "")) not in INVOICE_MIME_TYPES:
-                logger.debug("Skipping attachment %s: unsupported type %s", att.get("name"), att.get("contentType"))
-                continue
+            # Skip unsupported MIME types — but fall back to file extension
+            # when the server sends application/octet-stream (common with some
+            # mail servers like Rouquette's).
+            ct = normalize_content_type(att.get("contentType", ""))
+            att_name = att.get("name", "")
+            if ct not in INVOICE_MIME_TYPES:
+                ext_ct = _mime_from_extension(att_name)
+                if ext_ct and ext_ct in INVOICE_MIME_TYPES:
+                    logger.debug(
+                        "Attachment %s has generic type %s — accepted by extension as %s",
+                        att_name, ct, ext_ct,
+                    )
+                else:
+                    logger.debug("Skipping attachment %s: unsupported type %s", att_name, ct)
+                    continue
 
             # Skip very large attachments (> 20 MB)
             if att.get("size", 0) > 20 * 1024 * 1024:

@@ -60,9 +60,10 @@ schedule:
   report_hour: 8
 
 classifier:
-  # Anthropic API key for invoice classification (claude-haiku).
-  # Prefer setting via ANTHROPIC_API_KEY env var (see .env.example).
-  # api_key: "your-api-key"
+  # Model to use for classification via claude CLI (claude -p).
+  # Uses your Claude subscription — no API key needed.
+  # Common values: "opus", "sonnet", "haiku"
+  model: "opus"
 
   # Confidence threshold — below this, files are uploaded anyway (fail-safe)
   confidence_threshold: 0.5

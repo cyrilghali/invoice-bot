@@ -122,13 +122,13 @@ class TestProcessAttachment:
     @patch("pipeline.upload_to_review", return_value=("file-id", "https://link"))
     @patch("pipeline.build_filename", return_value="2025-03-15_example_contract.pdf")
     @patch("pipeline.is_invoice", return_value=("rejected", None, None, None, None, None, None))
-    def test_rejected_uploaded_to_review(self, mock_classify, mock_fname, mock_upload, mock_db):
+    def test_rejected_not_uploaded(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="contract.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         email = self._make_email()
 
         status = process_attachment(att, email, 2025, 3, {}, "/data", "cid", "Root")
         assert status == "rejected"
-        mock_upload.assert_called_once()
+        mock_upload.assert_not_called()  # rejected = silently dropped
         mock_db.save_invoice.assert_not_called()
 
     @patch("pipeline.db")

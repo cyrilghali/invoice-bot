@@ -5,9 +5,10 @@ Schedules two jobs:
   1. Poll inbox every N minutes (default: 60) and upload confirmed invoices to OneDrive.
   2. On the 1st of each month, build an Excel summary and upload it to OneDrive.
 
-All configuration is read from config.yaml (mounted at /app/config.yaml).
+All configuration is read from config.yaml (or CONFIG_PATH env var).
 """
 
+import fcntl
 import logging
 import os
 import sys
@@ -176,10 +177,25 @@ def send_report(config: dict) -> None:
     logger.info("========== REPORT END ==========\n")
 
 
+def _acquire_lock(data_dir: str):
+    """Acquire an exclusive file lock. Exits if another instance is running."""
+    lock_path = os.path.join(data_dir, "bot.lock")
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(f"Another instance is already running (lock: {lock_path})", file=sys.stderr)
+        sys.exit(1)
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    return lock_file  # keep reference alive — lock releases when process dies
+
+
 def main() -> None:
     # Bootstrap logging before anything else so all startup messages are captured
     data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
     os.makedirs(data_dir, exist_ok=True)
+    _lock = _acquire_lock(data_dir)  # noqa: F841 — must stay alive
 
     config = load_config()
     log_level = config.get("logging", {}).get("log_level", "INFO")

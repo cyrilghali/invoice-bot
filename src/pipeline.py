@@ -133,8 +133,9 @@ def process_attachment(
         attachment, config, hint_supplier=hint_supplier
     )
 
-    # Use AI-extracted supplier name for folder/filename (falls back to sender domain in uploader)
-    filename_supplier: str | None = doc_supplier
+    # Canonical supplier from config takes priority over AI extraction
+    # (avoids "La Favola" when the doc mentions the buyer, or inconsistent AI names)
+    filename_supplier: str | None = hint_supplier or doc_supplier
 
     # Derive folder year/month from invoice date when available
     inv_year, inv_month = year, month
@@ -200,11 +201,10 @@ def process_attachment(
             "Invoice saved to DB: filename=%r year=%d month=%d link=%s",
             stored_filename, inv_year, inv_month, drive_web_link,
         )
-    else:
-        reason_label = "rejected" if status == "rejected" else "review"
+    elif status == "review":
         logger.info(
-            "Routing to _a_verifier: file=%r status=%s from=%s folder=%s/%d/%02d/_a_verifier",
-            attachment.name, reason_label, email.sender, root_folder_name, inv_year, inv_month,
+            "Uncertain — routing to _a_verifier: file=%r from=%s folder=%s/%d/%02d/_a_verifier",
+            attachment.name, email.sender, root_folder_name, inv_year, inv_month,
         )
         _, review_web_link = upload_to_review(
             client_id=client_id,
@@ -219,4 +219,7 @@ def process_attachment(
             invoice_date=invoice_date,
             supplier=filename_supplier,
         )
+    else:
+        # rejected — confidently not an invoice (CGU, CGV, logos, etc.) — skip entirely
+        logger.info("Rejected (not an invoice): file=%r from=%s — not uploaded", attachment.name, email.sender)
     return status
