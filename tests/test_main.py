@@ -1,4 +1,4 @@
-"""Tests for src/main.py — poll_inbox and send_report orchestration."""
+"""Tests for src/main.py — source discovery and send_report orchestration."""
 
 import os
 from unittest.mock import patch, MagicMock, call
@@ -6,90 +6,135 @@ from datetime import datetime, timezone
 
 import pytest
 
-from main import poll_inbox, send_report
-from poller import Attachment, Email
+from main import _load_source_module, _register_sources, send_report
 
 
 # ---------------------------------------------------------------------------
-# poll_inbox
+# Source discovery
 # ---------------------------------------------------------------------------
 
-class TestPollInbox:
-    def _base_config(self):
-        return {
-            "microsoft": {"client_id": "cid"},
-            "onedrive": {"folder_name": "Root"},
-            "invoices": {
-                "whitelisted_senders": [],
-                "subject_keywords": [],
-                "sender_suppliers": {},
+class TestLoadSourceModule:
+    def test_loads_existing_module(self):
+        run_fn = _load_source_module("email_source")
+        assert run_fn is not None
+        assert callable(run_fn)
+
+    def test_returns_none_for_missing_module(self):
+        run_fn = _load_source_module("nonexistent_module_xyz")
+        assert run_fn is None
+
+    def test_returns_none_for_module_without_run(self):
+        # sources/__init__.py exists but has no run()
+        run_fn = _load_source_module("__init__")
+        assert run_fn is None
+
+
+class TestRegisterSources:
+    def test_registers_source_with_interval(self):
+        scheduler = MagicMock()
+        config = {
+            "sources": {
+                "test_inbox": {
+                    "module": "email_source",
+                    "interval_minutes": 10,
+                    "client_id": "cid",
+                    "onedrive_folder_name": "Root",
+                },
             },
-            "link_detection": {"keywords": []},
         }
+        _register_sources(scheduler, config, "/tmp/data")
+        scheduler.add_job.assert_called_once()
+        call_kwargs = scheduler.add_job.call_args
+        assert call_kwargs.kwargs["id"] == "source_test_inbox"
 
-    @patch("main.process_attachment", return_value="invoice")
-    @patch("main.db")
-    @patch("main.GraphClient")
-    def test_processes_new_emails(self, MockGraph, mock_db, mock_process, monkeypatch):
-        monkeypatch.setenv("DATA_DIR", "/tmp/test-data")
-        mock_db.is_email_processed.return_value = False
+    def test_skips_source_without_interval(self):
+        scheduler = MagicMock()
+        config = {
+            "sources": {
+                "cegedim": {
+                    "module": "email_source",  # exists, but no interval
+                    "client_id": "cid",
+                    "onedrive_folder_name": "Root",
+                },
+            },
+        }
+        _register_sources(scheduler, config, "/tmp/data")
+        scheduler.add_job.assert_not_called()
 
-        email = Email(
-            email_id="e1",
-            sender="a@b.com",
-            subject="Facture",
-            received_at="2025-03-15T10:00:00Z",
-            attachments=[Attachment("inv.pdf", "application/pdf", b"%PDF")],
-        )
-        MockGraph.return_value.fetch_emails_with_attachments.return_value = [email]
+    def test_skips_missing_module(self):
+        scheduler = MagicMock()
+        config = {
+            "sources": {
+                "broken": {
+                    "module": "nonexistent_xyz",
+                    "interval_minutes": 10,
+                },
+            },
+        }
+        _register_sources(scheduler, config, "/tmp/data")
+        scheduler.add_job.assert_not_called()
 
-        poll_inbox(self._base_config())
-        mock_process.assert_called_once()
-        mock_db.mark_email_processed.assert_called_once()
+    def test_two_instances_same_module(self):
+        scheduler = MagicMock()
+        config = {
+            "sources": {
+                "inbox_a": {
+                    "module": "email_source",
+                    "interval_minutes": 10,
+                    "client_id": "cid-a",
+                    "onedrive_folder_name": "Root",
+                },
+                "inbox_b": {
+                    "module": "email_source",
+                    "interval_minutes": 30,
+                    "client_id": "cid-b",
+                    "onedrive_folder_name": "Root",
+                },
+            },
+        }
+        _register_sources(scheduler, config, "/tmp/data")
+        assert scheduler.add_job.call_count == 2
 
-    @patch("main.process_attachment")
-    @patch("main.db")
-    @patch("main.GraphClient")
-    def test_skips_already_processed(self, MockGraph, mock_db, mock_process, monkeypatch):
-        monkeypatch.setenv("DATA_DIR", "/tmp/test-data")
-        mock_db.is_email_processed.return_value = True
+    def test_injects_source_name(self):
+        scheduler = MagicMock()
+        config = {
+            "sources": {
+                "my_inbox": {
+                    "module": "email_source",
+                    "interval_minutes": 10,
+                    "client_id": "cid",
+                    "onedrive_folder_name": "Root",
+                },
+            },
+        }
+        _register_sources(scheduler, config, "/tmp/data")
+        # Verify source_name was injected into instance config
+        assert config["sources"]["my_inbox"]["source_name"] == "my_inbox"
 
-        email = Email(
-            email_id="e1",
-            sender="a@b.com",
-            subject="Facture",
-            received_at="2025-03-15T10:00:00Z",
-            attachments=[Attachment("inv.pdf", "application/pdf", b"%PDF")],
-        )
-        MockGraph.return_value.fetch_emails_with_attachments.return_value = [email]
+    def test_no_sources_configured(self):
+        scheduler = MagicMock()
+        _register_sources(scheduler, {}, "/tmp/data")
+        scheduler.add_job.assert_not_called()
 
-        poll_inbox(self._base_config())
-        mock_process.assert_not_called()
-        mock_db.mark_email_processed.assert_not_called()
-
-    @patch("main.process_attachment", side_effect=Exception("upload failed"))
-    @patch("main.db")
-    @patch("main.GraphClient")
-    def test_continues_on_attachment_error(self, MockGraph, mock_db, mock_process, monkeypatch):
-        monkeypatch.setenv("DATA_DIR", "/tmp/test-data")
-        mock_db.is_email_processed.return_value = False
-
-        email = Email(
-            email_id="e1",
-            sender="a@b.com",
-            subject="Facture",
-            received_at="2025-03-15T10:00:00Z",
-            attachments=[
-                Attachment("inv1.pdf", "application/pdf", b"%PDF"),
-                Attachment("inv2.pdf", "application/pdf", b"%PDF"),
-            ],
-        )
-        MockGraph.return_value.fetch_emails_with_attachments.return_value = [email]
-
-        # Should not raise even though process_attachment fails
-        poll_inbox(self._base_config())
-        # Email still marked as processed after all attachments attempted
-        mock_db.mark_email_processed.assert_called_once()
+    def test_source_runner_catches_exceptions(self):
+        """Verify the runner wrapper catches source exceptions."""
+        scheduler = MagicMock()
+        config = {
+            "sources": {
+                "test_inbox": {
+                    "module": "email_source",
+                    "interval_minutes": 10,
+                    "client_id": "cid",
+                    "onedrive_folder_name": "Root",
+                },
+            },
+        }
+        _register_sources(scheduler, config, "/tmp/data")
+        # Get the runner function that was registered
+        runner = scheduler.add_job.call_args[0][0]
+        # Patch the actual source to raise — runner should not propagate
+        with patch("sources.email_source.run", side_effect=Exception("boom")):
+            runner()  # Should not raise
 
 
 # ---------------------------------------------------------------------------

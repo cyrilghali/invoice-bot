@@ -2,7 +2,6 @@
 # Invoice Bot - Configuration Template
 # ============================================================
 # Copy this file to config.yaml and fill in your values.
-# config.yaml is mounted read-only into the container.
 #
 # Secrets (API keys, client IDs) should be set via environment
 # variables — see .env.example. They can also be set here, but
@@ -20,39 +19,88 @@ onedrive:
   # Subfolders YYYY/MM/ are created automatically.
   folder_name: "YOUR_FOLDER_NAME_HERE"
 
-invoices:
-  # Optional sender whitelist. If omitted or empty, ALL emails with attachments
-  # are scanned — the AI classifier decides what is an invoice.
-  # Uncomment and fill to restrict processing to specific senders only.
-  # whitelisted_senders:
-  #   - "factures@supplier.fr"
+# ---------------------------------------------------------------------------
+# Sources — each entry is a source instance that fetches invoices.
+#
+# - `module`: which .py file to load from src/sources/ (default: the instance name)
+# - `interval_minutes`: if set, APScheduler runs this source on an interval.
+#   If absent, the source is triggered externally (systemd timer / cron):
+#     python -m sources.run <instance_name>
+#
+# Multiple instances of the same module are supported (e.g. two email inboxes
+# with different credentials).
+# ---------------------------------------------------------------------------
+sources:
+  # Email inbox source — polls Microsoft Graph API for invoice emails
+  main_inbox:
+    module: email_source
+    interval_minutes: 10
+    # client_id is inherited from microsoft.client_id if not set here
+    # client_id: "your-client-id"
+    onedrive_folder_name: "YOUR_FOLDER_NAME_HERE"
 
-  # Subject keyword filter. Only emails whose subject contains at least one of
-  # these keywords (case-insensitive) are processed.
-  # Emails with an empty subject are always passed through.
-  subject_keywords:
-    - facture
-    - invoice
-    - avoir
-    - recu
-    - receipt
-    - facturation
-    - paiement
-    - payment
-    - bill
-    - quittance
-    - decompte
-    - releve
-    - cotisation
-    - abonnement
-    - subscription
-    - confirmation de commande
-    - order confirmation
+    # Optional sender whitelist. If omitted or empty, ALL emails with attachments
+    # are scanned — the AI classifier decides what is an invoice.
+    # whitelisted_senders:
+    #   - "factures@supplier.fr"
+
+    # Subject keyword filter. Only emails whose subject contains at least one of
+    # these keywords (case-insensitive) are processed.
+    subject_keywords:
+      - facture
+      - invoice
+      - avoir
+      - recu
+      - receipt
+      - facturation
+      - paiement
+      - payment
+      - bill
+      - quittance
+      - decompte
+      - releve
+      - cotisation
+      - abonnement
+      - subscription
+      - confirmation de commande
+      - order confirmation
+
+    # Keywords used to identify invoice download links in email bodies.
+    link_keywords:
+      - invoice
+      - receipt
+      - download
+      - bill
+      - pdf
+      - facture
+      - recu
+      - telecharger
+      - telechargement
+      - quittance
+      - avoir
+
+  # Example: second inbox with different credentials
+  # secondary_inbox:
+  #   module: email_source
+  #   interval_minutes: 30
+  #   client_id: "other-client-id"
+  #   onedrive_folder_name: "YOUR_FOLDER_NAME_HERE"
+
+  # Example: web scraper source (triggered externally, no interval_minutes)
+  # cegedim:
+  #   username: "..."
+  #   password_env: "CEGEDIM_PASS"
+
+# ---------------------------------------------------------------------------
+# Shared settings
+# ---------------------------------------------------------------------------
+
+invoices:
+  # Map sender email → canonical supplier name for the classifier hint.
+  # sender_suppliers:
+  #   "factures@supplier.fr": "Supplier Name"
 
 schedule:
-  # How often to check the inbox (in minutes)
-  poll_interval_minutes: 10
-
   # Day of month to generate the Excel summary (1 = 1st of the month)
   report_day_of_month: 1
 
@@ -62,45 +110,18 @@ schedule:
 classifier:
   # Model to use for classification via claude CLI (claude -p).
   # Uses your Claude subscription — no API key needed.
-  # Common values: "opus", "sonnet", "haiku"
   model: "opus"
 
   # Confidence threshold — below this, files are uploaded anyway (fail-safe)
   confidence_threshold: 0.5
 
   # Your own business names (the BUYER on invoices, not the supplier).
-  # If Claude extracts one of these as the supplier, it is discarded and the
-  # supplier name falls back to the sender domain. Case-insensitive.
   # owner_business_names:
   #   - "my restaurant"
-  #   - "my company llc"
 
 debug:
   # If set, only emails received after this date (YYYY-MM-DD) are processed.
-  # Useful for initial setup or testing. Remove or leave empty in production.
   # since_date: "2025-01-01"
 
 logging:
-  # Log level for the bot. Supported values: DEBUG, INFO, WARNING, ERROR
-  # Use DEBUG to see raw Claude responses, extraction char counts, and every HTTP request detail.
-  # INFO (default) is recommended for production — one line per meaningful event.
   log_level: INFO
-
-link_detection:
-  # Keywords used to identify invoice download links in email bodies.
-  # A URL is considered an invoice link if it contains any of these keywords
-  # (case-insensitive). Applies to both HTML and plain-text emails.
-  keywords:
-    - invoice
-    - receipt
-    - download
-    - bill
-    - pdf
-    - facture
-    - recu
-    - telecharger
-    - telechargement
-    - quittance
-    - avoir
-
-

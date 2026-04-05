@@ -44,13 +44,13 @@ def setup_logging(data_dir: str = "data", log_level: str = "INFO") -> None:
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
 
-    # Rotating file handler — 5 MB × 5 files = up to 25 MB on disk
+    # Rotating file handler — 20 MB × 10 files = up to 200 MB on disk
     os.makedirs(data_dir, exist_ok=True)
     log_path = os.path.join(data_dir, "bot.log")
     file_handler = logging.handlers.RotatingFileHandler(
         log_path,
-        maxBytes=5 * 1024 * 1024,  # 5 MB
-        backupCount=5,
+        maxBytes=20 * 1024 * 1024,  # 20 MB
+        backupCount=10,
         encoding="utf-8",
     )
     file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))

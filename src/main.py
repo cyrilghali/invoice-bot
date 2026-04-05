@@ -1,14 +1,15 @@
 """
 Invoice Bot - Main entry point.
 
-Schedules two jobs:
-  1. Poll inbox every N minutes (default: 60) and upload confirmed invoices to OneDrive.
-  2. On the 1st of each month, build an Excel summary and upload it to OneDrive.
+Schedules source jobs dynamically from config.yaml and a monthly Excel report.
+Sources with `interval_minutes` are scheduled by APScheduler.
+Sources without it are triggered externally (systemd timer / cron).
 
 All configuration is read from config.yaml (or CONFIG_PATH env var).
 """
 
 import fcntl
+import importlib
 import logging
 import os
 import sys
@@ -21,103 +22,77 @@ from apscheduler.triggers.interval import IntervalTrigger
 import db
 from excel_exporter import build_monthly_excel
 from onedrive_uploader import upload_attachment
-from pipeline import process_attachment
-from poller import GraphClient
 from utils import DEFAULT_DATA_DIR, load_config, setup_logging
 
 logger = logging.getLogger("main")
 
 
-def poll_inbox(config: dict) -> None:
-    """Fetch new invoice emails and upload attachments to OneDrive."""
-    logger.info("========== POLL START ==========")
-    logger.info("Poll triggered at %s (UTC)", datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+# ---------------------------------------------------------------------------
+# Source discovery and scheduling
+# ---------------------------------------------------------------------------
 
-    data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
+def _load_source_module(module_name: str):
+    """Import a source module from src/sources/ and return its run function."""
+    try:
+        mod = importlib.import_module(f"sources.{module_name}")
+    except ImportError as e:
+        logger.warning("Source module 'sources.%s' not found: %s — skipping", module_name, e)
+        return None
 
-    client_id: str = config["microsoft"]["client_id"]
-    root_folder_name: str = config["onedrive"]["folder_name"]
+    run_fn = getattr(mod, "run", None)
+    if run_fn is None:
+        logger.warning("Source module 'sources.%s' has no run() function — skipping", module_name)
+        return None
 
-    # Optional whitelist — if absent/empty, all senders are scanned
-    raw_senders: list[str] = (config.get("invoices") or {}).get("whitelisted_senders") or []
-    whitelisted_senders = [s.lower().strip() for s in raw_senders] if raw_senders else None
-    if whitelisted_senders:
-        logger.info("Sender whitelist active: %d senders", len(whitelisted_senders))
-    else:
-        logger.info("No sender whitelist — scanning all inbox attachments (AI classifier active)")
+    return run_fn
 
-    # Optional subject keyword filter
-    raw_subject_kws: list[str] = (config.get("invoices") or {}).get("subject_keywords") or []
-    subject_keywords = [k.lower().strip() for k in raw_subject_kws] if raw_subject_kws else None
-    if subject_keywords:
-        logger.info("Subject keyword filter active: %d keywords", len(subject_keywords))
-    else:
-        logger.info("No subject keyword filter — all subjects accepted")
 
-    graph = GraphClient(client_id)
+def _make_source_runner(run_fn, instance_config: dict, data_dir: str):
+    """Return a callable that APScheduler can invoke for a source job."""
+    def runner():
+        try:
+            run_fn(instance_config, data_dir)
+        except Exception as e:
+            source_name = instance_config.get("source_name", "unknown")
+            logger.error("Source %s crashed: %s", source_name, e, exc_info=True)
+    return runner
 
-    # Optional date floor — ignore emails older than this date
-    since_date: str | None = (config.get("debug") or {}).get("since_date") or None
-    if since_date:
-        logger.info("Date filter active: only processing emails since %s", since_date)
-    else:
-        logger.info("No date filter — processing all emails")
 
-    # Fetch emails — subject filter pre-screens, AI classifier does final check
-    link_keywords: list[str] = config.get("link_detection", {}).get("keywords", [])
-    emails = graph.fetch_emails_with_attachments(
-        whitelisted_senders=whitelisted_senders,
-        since=since_date,
-        link_keywords=link_keywords,
-        subject_keywords=subject_keywords,
-    )
+def _register_sources(scheduler: BlockingScheduler, config: dict, data_dir: str) -> None:
+    """Discover and register source jobs from config."""
+    sources_config = config.get("sources", {})
+    if not sources_config:
+        logger.warning("No sources configured in config.yaml")
+        return
 
-    logger.info("Fetched %d email(s) with qualifying attachments.", len(emails))
-    new_count = 0
-    for email in emails:
-        if db.is_email_processed(data_dir, email.email_id):
-            logger.debug("Email %s already processed, skipping.", email.email_id)
+    for instance_name, instance_config in sources_config.items():
+        module_name = instance_config.get("module", instance_name)
+        run_fn = _load_source_module(module_name)
+        if run_fn is None:
             continue
 
-        received_dt = email.received_datetime
-        year = received_dt.year
-        month = received_dt.month
+        # Inject instance name into config so the source knows its identity
+        instance_config["source_name"] = instance_name
 
-        for attachment in email.attachments:
-            try:
-                status = process_attachment(
-                    attachment=attachment,
-                    email=email,
-                    year=year,
-                    month=month,
-                    config=config,
-                    data_dir=data_dir,
-                    client_id=client_id,
-                    root_folder_name=root_folder_name,
-                )
-                if status == "invoice":
-                    new_count += 1
-            except Exception as e:
-                logger.error(
-                    "Failed to process attachment %s from %s: %s",
-                    attachment.name,
-                    email.sender,
-                    e,
-                    exc_info=True,
-                )
+        # Also pass through top-level config that sources may need
+        if "invoices" in config and "invoices" not in instance_config:
+            instance_config["invoices"] = config["invoices"]
+        if "classifier" in config and "classifier" not in instance_config:
+            instance_config["classifier"] = config["classifier"]
 
-        # Mark after all attachments are processed so a crash mid-email
-        # allows the email to be retried on the next poll.
-        db.mark_email_processed(
-            data_dir,
-            email_id=email.email_id,
-            sender=email.sender,
-            subject=email.subject,
-            received_at=email.received_at,
-        )
-
-    logger.info("Poll complete. %d new invoice(s) stored.", new_count)
-    logger.info("========== POLL END ==========\n")
+        interval = instance_config.get("interval_minutes")
+        if interval:
+            runner = _make_source_runner(run_fn, instance_config, data_dir)
+            scheduler.add_job(
+                runner,
+                trigger=IntervalTrigger(minutes=int(interval)),
+                id=f"source_{instance_name}",
+                name=f"Source: {instance_name} (every {interval}m)",
+                next_run_time=datetime.now(tz=timezone.utc),
+            )
+            logger.info("Registered source '%s' (module=%s) — every %d min", instance_name, module_name, interval)
+        else:
+            logger.info("Source '%s' (module=%s) — externally triggered, not scheduled", instance_name, module_name)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +181,7 @@ def main() -> None:
     # Initialize DB
     db.init_db(data_dir)
 
-    # Validate required config fields (secrets may come from env vars via load_config)
+    # Validate required config fields
     _placeholders = {"YOUR_CLIENT_ID_HERE", "YOUR_FOLDER_NAME_HERE", "your-client-id"}
     required = [
         ("microsoft", "client_id"),
@@ -221,21 +196,15 @@ def main() -> None:
             )
             sys.exit(1)
 
-    poll_interval = config.get("schedule", {}).get("poll_interval_minutes", 60)
-    report_day    = config.get("schedule", {}).get("report_day_of_month", 1)
-    report_hour   = config.get("schedule", {}).get("report_hour", 8)
+    report_day = config.get("schedule", {}).get("report_day_of_month", 1)
+    report_hour = config.get("schedule", {}).get("report_hour", 8)
 
     scheduler = BlockingScheduler(timezone="UTC")
 
-    scheduler.add_job(
-        poll_inbox,
-        trigger=IntervalTrigger(minutes=poll_interval),
-        args=[config],
-        id="poll_inbox",
-        name="Poll inbox for new invoices",
-        next_run_time=datetime.now(tz=timezone.utc),  # run immediately on start
-    )
+    # Register sources from config
+    _register_sources(scheduler, config, data_dir)
 
+    # Monthly report job
     scheduler.add_job(
         send_report,
         trigger=CronTrigger(day=report_day, hour=report_hour, minute=0),
@@ -245,8 +214,8 @@ def main() -> None:
     )
 
     logger.info(
-        "Scheduler started. Polling every %d min. Monthly Excel on day %d at %02d:00 UTC.",
-        poll_interval, report_day, report_hour,
+        "Scheduler started. Monthly Excel on day %d at %02d:00 UTC.",
+        report_day, report_hour,
     )
 
     try:
