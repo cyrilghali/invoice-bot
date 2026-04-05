@@ -3,11 +3,16 @@ CLI entry point for running a source externally (systemd timer / cron).
 
 Usage:
     python -m sources.run <instance_name>
+    python -m sources.run <instance_name> --file /path/to/file.pdf [--file ...] [--sender "Dad"]
 
 Loads config.yaml, finds the named source instance, imports its module,
 and calls run(). Exits when done.
+
+The --file and --sender flags are injected into the source config as
+_files and _sender, for sources that accept external input (e.g. manual_source).
 """
 
+import argparse
 import os
 import sys
 
@@ -16,12 +21,22 @@ from utils import DEFAULT_DATA_DIR, load_config, setup_logging
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: python -m sources.run <instance_name>", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Run an invoice-bot source externally.",
+        usage="python -m sources.run <instance_name> [--file PATH ...] [--sender NAME]",
+    )
+    parser.add_argument("instance_name", help="Source instance name from config.yaml")
+    parser.add_argument(
+        "--file", dest="files", action="append", default=[],
+        help="File path to process (can be repeated). Used by manual_source.",
+    )
+    parser.add_argument(
+        "--sender", default=None,
+        help="Sender label for manual files (default: from config or 'manual').",
+    )
+    args = parser.parse_args()
 
-    instance_name = sys.argv[1]
-
+    instance_name = args.instance_name
     data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
     os.makedirs(data_dir, exist_ok=True)
 
@@ -40,11 +55,24 @@ def main() -> None:
     module_name = instance_config.get("module", instance_name)
     instance_config["source_name"] = instance_name
 
+    # Inject CLI args for sources that use them (manual_source)
+    if args.files:
+        instance_config["_files"] = args.files
+    if args.sender:
+        instance_config["_sender"] = args.sender
+
     # Pass through top-level config that sources may need
     if "invoices" in config and "invoices" not in instance_config:
         instance_config["invoices"] = config["invoices"]
     if "classifier" in config and "classifier" not in instance_config:
         instance_config["classifier"] = config["classifier"]
+
+    # Inject client_id from microsoft config (sources need it for Graph API)
+    if "client_id" not in instance_config:
+        ms_config = config.get("microsoft", {})
+        client_id = ms_config.get("client_id")
+        if client_id:
+            instance_config["client_id"] = client_id
 
     try:
         import importlib
