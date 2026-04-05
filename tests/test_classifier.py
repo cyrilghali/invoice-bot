@@ -78,11 +78,12 @@ class TestParseResponse:
 
     def test_valid_json(self):
         raw = self._make_json()
-        is_inv, conf, reason, date, supplier, ht, ttc, tva, cur = _parse_response(raw)
+        is_inv, conf, reason, date, supplier, entity, ht, ttc, tva, cur = _parse_response(raw)
         assert is_inv is True
         assert conf == 0.95
         assert date == "2025-03-15"
         assert supplier == "Acme Corp"
+        assert entity is None
         assert ht == 100.0
         assert ttc == 120.0
         assert tva == 20.0
@@ -345,11 +346,11 @@ class TestIsInvoice:
     @patch("classifier._extract_pdf_text", return_value="FACTURE #123 Total: 100 EUR — émise le 15 mars 2025 par Acme Corp")
     @patch("classifier._classify_text")
     def test_pdf_invoice_confirmed(self, mock_classify, mock_extract):
-        mock_classify.return_value = (True, 0.9, "Invoice", "2025-03-15", "Acme", 100.0, 120.0, 20.0, "EUR")
+        mock_classify.return_value = (True, 0.9, "Invoice", "2025-03-15", "Acme", None, 100.0, 120.0, 20.0, "EUR")
         att = Attachment(name="facture.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {"classifier": {"confidence_threshold": 0.5}}
 
-        status, date, supplier, ht, ttc, tva, cur = is_invoice(att, config)
+        status, date, supplier, entity, ht, ttc, tva, cur = is_invoice(att, config)
         assert status == "invoice"
         assert date == "2025-03-15"
         assert supplier == "Acme"
@@ -357,7 +358,7 @@ class TestIsInvoice:
     @patch("classifier._extract_pdf_text", return_value="Contract agreement terms and conditions for services rendered by company")
     @patch("classifier._classify_text")
     def test_pdf_rejected(self, mock_classify, mock_extract):
-        mock_classify.return_value = (False, 0.9, "Not an invoice", None, None, None, None, None, None)
+        mock_classify.return_value = (False, 0.9, "Not an invoice", None, None, None, None, None, None, None)
         att = Attachment(name="contract.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {"classifier": {"confidence_threshold": 0.5}}
 
@@ -369,13 +370,13 @@ class TestIsInvoice:
     @patch("classifier._classify_text")
     def test_borderline_confidence_triggers_retry(self, mock_classify, mock_retry, mock_extract):
         # First pass returns borderline confidence (between 0.3 and 0.5)
-        mock_classify.return_value = (True, 0.35, "Uncertain", None, None, None, None, None, None)
+        mock_classify.return_value = (True, 0.35, "Uncertain", None, None, None, None, None, None, None)
         # Retry returns higher confidence
-        mock_retry.return_value = (True, 0.8, "Invoice confirmed", "2025-06-01", "Netexial", 200.0, 240.0, 40.0, "EUR")
+        mock_retry.return_value = (True, 0.8, "Invoice confirmed", "2025-06-01", "Netexial", None, 200.0, 240.0, 40.0, "EUR")
         att = Attachment(name="maybe.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {"classifier": {"confidence_threshold": 0.5}}
 
-        status, date, supplier, *_ = is_invoice(att, config)
+        status, date, supplier, entity, *_ = is_invoice(att, config)
         assert status == "invoice"
         assert supplier == "Netexial"
         mock_retry.assert_called_once()
@@ -384,7 +385,7 @@ class TestIsInvoice:
     @patch("classifier._classify_text")
     def test_very_low_confidence_no_retry(self, mock_classify, mock_extract):
         # Confidence below RETRY_CONFIDENCE_LOW (0.3) — no retry
-        mock_classify.return_value = (True, 0.1, "No idea", None, None, None, None, None, None)
+        mock_classify.return_value = (True, 0.1, "No idea", None, None, None, None, None, None, None)
         att = Attachment(name="maybe.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {"classifier": {"confidence_threshold": 0.5}}
 
@@ -394,11 +395,11 @@ class TestIsInvoice:
     @patch("classifier._classify_pdf_vision")
     @patch("classifier._extract_pdf_text", return_value="")
     def test_scanned_pdf_falls_back_to_vision(self, mock_extract, mock_vision):
-        mock_vision.return_value = (True, 0.9, "Scanned invoice", "2025-03-15", "Cegedim", 500.0, 600.0, 100.0, "EUR")
+        mock_vision.return_value = (True, 0.9, "Scanned invoice", "2025-03-15", "Cegedim", None, 500.0, 600.0, 100.0, "EUR")
         att = Attachment(name="46.jpg.pdf", content_type="application/pdf", content_bytes=b"%PDF-scanned")
         config = {"classifier": {"confidence_threshold": 0.5}}
 
-        status, date, supplier, *_ = is_invoice(att, config)
+        status, date, supplier, entity, *_ = is_invoice(att, config)
         assert status == "invoice"
         assert supplier == "Cegedim"
         mock_vision.assert_called_once()
@@ -407,7 +408,7 @@ class TestIsInvoice:
     @patch("classifier._extract_pdf_text", return_value="ab")
     def test_short_pdf_text_triggers_vision_fallback(self, mock_extract, mock_vision):
         # Text shorter than MIN_TEXT_CHARS (50) triggers vision
-        mock_vision.return_value = (True, 0.85, "ok", None, None, None, None, None, None)
+        mock_vision.return_value = (True, 0.85, "ok", None, None, None, None, None, None, None)
         att = Attachment(name="scan.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {"classifier": {}}
 
@@ -417,11 +418,11 @@ class TestIsInvoice:
 
     @patch("classifier._classify_image")
     def test_image_jpeg_classified(self, mock_classify_img):
-        mock_classify_img.return_value = (True, 0.95, "Receipt image", "2025-01-10", "Shop", 50.0, 60.0, 10.0, "EUR")
+        mock_classify_img.return_value = (True, 0.95, "Receipt image", "2025-01-10", "Shop", None, 50.0, 60.0, 10.0, "EUR")
         att = Attachment(name="receipt.jpg", content_type="image/jpeg", content_bytes=b"\xff\xd8")
         config = {"classifier": {"confidence_threshold": 0.5}}
 
-        status, date, supplier, *_ = is_invoice(att, config)
+        status, date, supplier, entity, *_ = is_invoice(att, config)
         assert status == "invoice"
         assert supplier == "Shop"
 
@@ -437,7 +438,7 @@ class TestIsInvoice:
     @patch("classifier._extract_pdf_text", return_value="text enough to pass minimum threshold for classification by the system")
     @patch("classifier._classify_text")
     def test_loads_model_from_config(self, mock_classify, mock_extract):
-        mock_classify.return_value = (True, 0.9, "ok", None, None, None, None, None, None)
+        mock_classify.return_value = (True, 0.9, "ok", None, None, None, None, None, None, None)
         att = Attachment(name="f.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {"classifier": {"model": "sonnet"}}
 
@@ -448,7 +449,7 @@ class TestIsInvoice:
     @patch("classifier._extract_pdf_text", return_value="text enough to pass minimum threshold for classification by the system")
     @patch("classifier._classify_text")
     def test_defaults_to_opus_model(self, mock_classify, mock_extract):
-        mock_classify.return_value = (True, 0.9, "ok", None, None, None, None, None, None)
+        mock_classify.return_value = (True, 0.9, "ok", None, None, None, None, None, None, None)
         att = Attachment(name="f.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {"classifier": {}}
 
@@ -459,7 +460,7 @@ class TestIsInvoice:
     @patch("classifier._classify_image")
     def test_image_borderline_no_retry_without_text(self, mock_classify_img):
         # Images have no extracted text, so retry should NOT trigger
-        mock_classify_img.return_value = (True, 0.35, "Uncertain", None, None, None, None, None, None)
+        mock_classify_img.return_value = (True, 0.35, "Uncertain", None, None, None, None, None, None, None)
         att = Attachment(name="photo.jpg", content_type="image/jpeg", content_bytes=b"\xff\xd8")
         config = {"classifier": {"confidence_threshold": 0.5}}
 

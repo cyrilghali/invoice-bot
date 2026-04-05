@@ -54,13 +54,17 @@ SYSTEM_PROMPT = (
     "(= tout document commercial émis par un fournisseur lié à la facturation). "
     "Extrais la date du document (date de facturation ou date du relevé, pas la date d'échéance), "
     "le nom du fournisseur/émetteur, "
+    "le nom de l'entité DESTINATAIRE / CLIENT facturé (la société ou personne à qui la facture est adressée), "
     "et les montants HT, TVA et TTC ainsi que la devise. "
     "Pour le fournisseur, retourne UNIQUEMENT le nom commercial court en casse titre "
     "(ex: «Fresca», pas «FRESCA», pas «S.A.S. au capital de...», pas «ROUQUETTE SARL SAINT CYRIL» mais «Rouquette»). "
+    "Pour l'entité destinataire (entity), retourne le nom exact tel qu'il apparaît sur le document "
+    "(ex: «SCI SAINT KARAS», «ST CYRIL», «LA FAVOLA»). "
     "Pour les avoirs, retourne les montants en négatif. "
     "Réponds UNIQUEMENT en JSON valide, sans texte autour : "
     '{"is_invoice": true/false, "confidence": 0.0-1.0, "reason": "...", '
     '"invoice_date": "YYYY-MM-DD or null", "supplier": "nom commercial court or null", '
+    '"entity": "nom du client/destinataire facturé or null", '
     '"amount_ht": <number or null>, "amount_tva": <number or null>, '
     '"amount_ttc": <number or null>, "currency": "EUR or null"} '
     "is_invoice=true pour les factures, avoirs, reçus ET relevés de factures. "
@@ -128,11 +132,11 @@ def _extract_xlsx_text(data: bytes) -> str:
 # Claude CLI
 # ---------------------------------------------------------------------------
 
-# (is_invoice, confidence, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency)
+# (is_invoice, confidence, reason, invoice_date, supplier, entity, amount_ht, amount_ttc, amount_tva, currency)
 # NOTE: order is HT, TTC, TVA — consistent with the public is_invoice() API.
-_ClassifyResult = tuple[bool, float, str, str | None, str | None, float | None, float | None, float | None, str | None]
+_ClassifyResult = tuple[bool, float, str, str | None, str | None, str | None, float | None, float | None, float | None, str | None]
 
-_EMPTY_RESULT: _ClassifyResult = (False, 0.0, "No text extracted — sending to review", None, None, None, None, None, None)
+_EMPTY_RESULT: _ClassifyResult = (False, 0.0, "No text extracted — sending to review", None, None, None, None, None, None, None)
 
 
 def _run_claude_cli(
@@ -279,6 +283,12 @@ def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyR
         if supplier and any(owned in supplier.lower() for owned in names):
             supplier = None
 
+        # entity (billed party / customer)
+        raw_entity = data.get("entity")
+        entity: str | None = None
+        if raw_entity and str(raw_entity).strip().lower() not in ("null", "none", "n/a", ""):
+            entity = str(raw_entity).strip()[:80]
+
         # amounts & currency
         amount_ht = _parse_amount(data.get("amount_ht"))
         amount_tva = _parse_amount(data.get("amount_tva"))
@@ -289,11 +299,11 @@ def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyR
         if raw_currency and str(raw_currency).strip().upper() not in ("NULL", "NONE", ""):
             currency = str(raw_currency).strip().upper()[:8]
 
-        return is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency
+        return is_inv, conf, reason, invoice_date, supplier, entity, amount_ht, amount_ttc, amount_tva, currency
 
     except Exception as e:
         logger.warning("Failed to parse classifier response %r: %s", raw, e, exc_info=True)
-        return True, 0.0, "Parse error — sending to review", None, None, None, None, None, None
+        return True, 0.0, "Parse error — sending to review", None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -310,13 +320,14 @@ def is_invoice(
     attachment: Attachment,
     config: dict,
     hint_supplier: str | None = None,
-) -> tuple[str, str | None, str | None, float | None, float | None, float | None, str | None]:
+) -> tuple[str, str | None, str | None, str | None, float | None, float | None, float | None, str | None]:
     """
     Classify an attachment using Claude via the claude CLI.
 
     Returns:
-        (status, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency)
+        (status, invoice_date, supplier, entity, amount_ht, amount_ttc, amount_tva, currency)
           status: "invoice" / "review" / "rejected"
+          entity: billed party / customer name (e.g. "SCI SAINT KARAS", "ST CYRIL")
     """
     classifier_cfg = config.get("classifier", {})
     model = classifier_cfg.get("model", MODEL)
@@ -356,23 +367,23 @@ def is_invoice(
 
         else:
             logger.info("Unsupported type %s for %r, routing to review", ct, attachment.name)
-            return "review", None, None, None, None, None, None
+            return "review", None, None, None, None, None, None, None
 
-        is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency = result
+        is_inv, conf, reason, invoice_date, supplier, entity, amount_ht, amount_ttc, amount_tva, currency = result
 
         # Two-pass retry: borderline confidence with text available
         if RETRY_CONFIDENCE_LOW <= conf < RETRY_CONFIDENCE_HIGH and text:
             logger.info("Borderline confidence %.2f for %r — retrying", conf, attachment.name)
-            is_inv, conf, reason, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency = (
+            is_inv, conf, reason, invoice_date, supplier, entity, amount_ht, amount_ttc, amount_tva, currency = (
                 _retry_classify(text, model, hint_supplier, owner_names))
 
         status = "invoice" if is_inv and conf >= threshold else "rejected" if not is_inv and conf >= threshold else "review"
 
-        logger.info("Result: file=%r status=%s confidence=%.2f supplier=%r date=%r",
-                    attachment.name, status, conf, supplier, invoice_date)
+        logger.info("Result: file=%r status=%s confidence=%.2f supplier=%r entity=%r date=%r",
+                    attachment.name, status, conf, supplier, entity, invoice_date)
 
-        return status, invoice_date, supplier, amount_ht, amount_ttc, amount_tva, currency
+        return status, invoice_date, supplier, entity, amount_ht, amount_ttc, amount_tva, currency
 
     except Exception as e:
         logger.warning("Classifier failed for %r: %s — routing to review", attachment.name, e)
-        return "review", None, None, None, None, None, None
+        return "review", None, None, None, None, None, None, None

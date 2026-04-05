@@ -137,12 +137,25 @@ def process_attachment(
     sender_suppliers: dict[str, str] = (config.get("invoices") or {}).get("sender_suppliers") or {}
     hint_supplier: str | None = sender_suppliers.get(sender_key)
 
-    status, invoice_date, doc_supplier, amount_ht, amount_ttc, amount_tva, currency = is_invoice(
+    status, invoice_date, doc_supplier, entity, amount_ht, amount_ttc, amount_tva, currency = is_invoice(
         attachment, config, hint_supplier=hint_supplier
     )
 
     # Canonical supplier from config takes priority over AI extraction
     filename_supplier: str | None = hint_supplier or doc_supplier
+
+    # Resolve OneDrive root folder based on entity (billed party).
+    # entity_folders in config maps entity name patterns to folder names.
+    # Falls back to the source's default root_folder_name.
+    resolved_root_folder = root_folder_name
+    if entity:
+        entity_folders: dict[str, str] = (config.get("invoices") or {}).get("entity_folders") or {}
+        entity_upper = entity.upper()
+        for pattern, folder in entity_folders.items():
+            if pattern.upper() in entity_upper:
+                resolved_root_folder = folder
+                logger.info("Entity '%s' matched pattern '%s' → folder '%s'", entity, pattern, folder)
+                break
 
     # Derive folder year/month from invoice date when available
     inv_year, inv_month = year, month
@@ -169,14 +182,14 @@ def process_attachment(
 
     if status == "invoice":
         logger.info(
-            "INVOICE confirmed: file=%r supplier=%r invoice_date=%r "
+            "INVOICE confirmed: file=%r supplier=%r entity=%r invoice_date=%r "
             "amount_ht=%s amount_ttc=%s currency=%r folder=%s/%d/%02d",
-            attachment.name, doc_supplier, invoice_date,
-            amount_ht, amount_ttc, currency, root_folder_name, inv_year, inv_month,
+            attachment.name, doc_supplier, entity, invoice_date,
+            amount_ht, amount_ttc, currency, resolved_root_folder, inv_year, inv_month,
         )
         drive_file_id, drive_web_link = upload_attachment(
             client_id=client_id,
-            root_folder_name=root_folder_name,
+            root_folder_name=resolved_root_folder,
             attachment_name=attachment.name,
             attachment_bytes=attachment.content_bytes,
             content_type=attachment.content_type,
@@ -213,11 +226,11 @@ def process_attachment(
     elif status == "review":
         logger.info(
             "Uncertain — routing to _a_verifier: file=%r from=%s folder=%s/%d/%02d/_a_verifier",
-            attachment.name, sender, root_folder_name, inv_year, inv_month,
+            attachment.name, sender, resolved_root_folder, inv_year, inv_month,
         )
         _, review_web_link = upload_to_review(
             client_id=client_id,
-            root_folder_name=root_folder_name,
+            root_folder_name=resolved_root_folder,
             attachment_name=attachment.name,
             attachment_bytes=attachment.content_bytes,
             content_type=attachment.content_type,

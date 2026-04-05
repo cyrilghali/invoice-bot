@@ -285,7 +285,7 @@ class TestInvoiceCrud:
         assert len(invoices) == 1
         assert invoices[0]["supplier"] is None
         assert invoices[0]["amount_ht"] is None
-        assert invoices[0]["email_id"] is None
+        assert invoices[0]["email_id"] == "doc-42"
 
 
 # ---------------------------------------------------------------------------

@@ -100,7 +100,7 @@ class TestProcessAttachment:
     @patch("pipeline.db")
     @patch("pipeline.upload_attachment", return_value=("file-id", "https://link"))
     @patch("pipeline.build_filename", return_value="2025-03-15_example_inv.pdf")
-    @patch("pipeline.is_invoice", return_value=("invoice", "2025-03-15", "Acme", 100.0, 120.0, 20.0, "EUR"))
+    @patch("pipeline.is_invoice", return_value=("invoice", "2025-03-15", "Acme", None, 100.0, 120.0, 20.0, "EUR"))
     def test_invoice_uploaded_and_saved(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
@@ -119,7 +119,7 @@ class TestProcessAttachment:
     @patch("pipeline.db")
     @patch("pipeline.upload_to_review", return_value=("file-id", "https://link"))
     @patch("pipeline.build_filename", return_value="2025-03-15_example_contract.pdf")
-    @patch("pipeline.is_invoice", return_value=("rejected", None, None, None, None, None, None))
+    @patch("pipeline.is_invoice", return_value=("rejected", None, None, None, None, None, None, None))
     def test_rejected_not_uploaded(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="contract.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
@@ -135,7 +135,7 @@ class TestProcessAttachment:
     @patch("pipeline.db")
     @patch("pipeline.upload_to_review", return_value=("file-id", "https://link"))
     @patch("pipeline.build_filename", return_value="2025-03-15_example_maybe.pdf")
-    @patch("pipeline.is_invoice", return_value=("review", None, None, None, None, None, None))
+    @patch("pipeline.is_invoice", return_value=("review", None, None, None, None, None, None, None))
     def test_review_uploaded_to_review(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="maybe.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
@@ -150,7 +150,7 @@ class TestProcessAttachment:
     @patch("pipeline.db")
     @patch("pipeline.upload_attachment", return_value=("file-id", "https://link"))
     @patch("pipeline.build_filename", return_value="2025-01-20_acme_inv.pdf")
-    @patch("pipeline.is_invoice", return_value=("invoice", "2025-01-20", "Acme", 100.0, 120.0, 20.0, "EUR"))
+    @patch("pipeline.is_invoice", return_value=("invoice", "2025-01-20", "Acme", None, 100.0, 120.0, 20.0, "EUR"))
     def test_invoice_date_overrides_year_month(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
@@ -173,8 +173,8 @@ class TestProcessAttachment:
     def test_zip_processes_members(self, mock_classify, mock_fname, mock_review, mock_upload, mock_db):
         # First call -> invoice, second call -> rejected
         mock_classify.side_effect = [
-            ("invoice", "2025-03-01", "Acme", 100.0, 120.0, 20.0, "EUR"),
-            ("rejected", None, None, None, None, None, None),
+            ("invoice", "2025-03-01", "Acme", None, 100.0, 120.0, 20.0, "EUR"),
+            ("rejected", None, None, None, None, None, None, None),
         ]
         zip_bytes = _make_zip(
             ("invoice.pdf", b"%PDF-data"),
@@ -206,7 +206,7 @@ class TestProcessAttachment:
     @patch("pipeline.db")
     @patch("pipeline.upload_attachment", return_value=("fid", "https://link"))
     @patch("pipeline.build_filename", return_value="fname.pdf")
-    @patch("pipeline.is_invoice", return_value=("invoice", None, None, None, None, None, None))
+    @patch("pipeline.is_invoice", return_value=("invoice", None, None, None, None, None, None, None))
     def test_sender_supplier_hint_used(self, mock_classify, mock_fname, mock_upload, mock_db):
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {
