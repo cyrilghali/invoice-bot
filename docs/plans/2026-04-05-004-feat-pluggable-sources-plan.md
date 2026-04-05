@@ -1,7 +1,7 @@
 ---
 title: "feat: Pluggable document sources"
 type: feat
-status: active
+status: completed
 date: 2026-04-05
 ---
 
@@ -87,7 +87,7 @@ Both paths call the same `run(config, data_dir)` and use the same DB functions.
 
 ## Implementation Units
 
-- [ ] **Unit 1: Generalize DB dedup from email_id to (source_name, source_id)**
+- [x] **Unit 1: Generalize DB dedup from email_id to (source_name, source_id)**
 
 **Goal:** Replace `processed_emails` with a source-agnostic `processed_documents` table so any source can track what it has already processed.
 
@@ -126,7 +126,7 @@ Both paths call the same `run(config, data_dir)` and use the same DB functions.
 
 ---
 
-- [ ] **Unit 2: Move email logic into sources/email_source.py**
+- [x] **Unit 2: Move email logic into sources/email_source.py**
 
 **Goal:** Extract the email fetch logic from `main.py` into a self-contained source file.
 
@@ -167,7 +167,7 @@ Both paths call the same `run(config, data_dir)` and use the same DB functions.
 
 ---
 
-- [ ] **Unit 3: Rewrite main.py with source auto-discovery + CLI entry point**
+- [x] **Unit 3: Rewrite main.py with source auto-discovery + CLI entry point**
 
 **Goal:** main.py schedules lightweight sources via APScheduler. A CLI entry point allows external triggers for heavy sources.
 
