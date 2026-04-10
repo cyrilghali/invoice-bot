@@ -1,0 +1,22 @@
+[Unit]
+Description=Invoice Bot — WhatsApp Cloud API webhook receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cyrilghali/repos/invoice-bot
+ExecStart=/usr/bin/python3 -m uvicorn sources.whatsapp_webhook:app --app-dir src --host 127.0.0.1 --port 8321
+EnvironmentFile=/home/cyrilghali/repos/invoice-bot/.env
+Environment=PATH=/home/cyrilghali/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Auto-restart on any failure, with increasing delay
+Restart=on-failure
+RestartSec=10
+
+# Crash-loop protection: max 5 starts within 3 minutes, then stop trying
+StartLimitBurst=5
+StartLimitIntervalSec=180
+
+[Install]
+WantedBy=default.target

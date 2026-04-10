@@ -10,8 +10,13 @@ systemctl --user start invoice-bot
 systemctl --user status invoice-bot
 journalctl --user -u invoice-bot -f   # live logs
 
+# WhatsApp webhook receiver — separate service (push-based, not APScheduler)
+systemctl --user start invoice-bot-whatsapp
+journalctl --user -u invoice-bot-whatsapp -f
+
 # Development — foreground
 python3 src/main.py
+uvicorn sources.whatsapp_webhook:app --app-dir src --port 8321  # whatsapp webhook
 
 # Run a single source externally (for heavy scrapers via systemd timer/cron)
 python3 -m sources.run <instance_name>
@@ -30,11 +35,13 @@ cp .env.example .env
 # 3. Authenticate Microsoft account (one-time)
 python3 src/auth_setup.py
 
-# 4. Install systemd service
+# 4. Install systemd services
 mkdir -p ~/.config/systemd/user
 cp invoice-bot.service ~/.config/systemd/user/
+cp invoice-bot-whatsapp.service ~/.config/systemd/user/  # if using WhatsApp
 systemctl --user daemon-reload
 systemctl --user enable --now invoice-bot
+systemctl --user enable --now invoice-bot-whatsapp  # if using WhatsApp
 loginctl enable-linger $USER   # survive reboots without login
 ```
 
@@ -49,7 +56,7 @@ python3 -m pytest tests/test_classifier.py  # single file
 ## Architecture
 
 ```
-APScheduler (BlockingScheduler)
+APScheduler (BlockingScheduler)          [invoice-bot.service]
 ├── source auto-discovery from config.yaml
 │   ├── sources/email_source.py  — polls inbox via Microsoft Graph API
 │   ├── sources/<custom>.py      — any custom source (scraper, API, etc.)
@@ -62,11 +69,20 @@ APScheduler (BlockingScheduler)
 └── send_report()  — 1st of each month
     ├── db.py            → queries unreported invoices
     └── excel_exporter.py → builds Excel summary
+
+FastAPI + uvicorn                         [invoice-bot-whatsapp.service]
+└── sources/whatsapp_webhook.py — push-based, receives Meta webhook POSTs
+    └── reuses manual_source.run() → pipeline → OneDrive + DB
 ```
 
 Sources with `interval_minutes` in config are scheduled by APScheduler.
 Sources without it are triggered externally via `python -m sources.run <name>`.
 Multiple instances of the same source module are supported (e.g. two email inboxes).
+
+The WhatsApp webhook is **not** a `sources:` entry — it lives under a top-level
+`whatsapp:` config block and runs as its own uvicorn process, so a webhook
+crash never takes down the polling scheduler. See "WhatsApp Cloud API setup"
+below for the one-time Meta dashboard walkthrough.
 
 ## Key files
 
@@ -89,6 +105,24 @@ Multiple instances of the same source module are supported (e.g. two email inbox
 3. The source calls `is_invoice()`, `upload_attachment()`, `save_invoice()` directly
 4. Use `db.is_document_processed()` / `db.mark_document_processed()` for dedup
 5. Call `db.save_source_run()` at the end for observability
+
+## WhatsApp Cloud API setup
+
+One-time setup for the push-based `invoice-bot-whatsapp.service`:
+
+1. **Meta Business** → business.facebook.com → create account.
+2. **developers.facebook.com** → Create App → "Business" → add "WhatsApp" product.
+3. **WhatsApp → API Setup** → add and verify phone number (warning: the number can no longer be used with regular WhatsApp once verified).
+4. **Business Settings → Users → System Users** → create one → assign permissions `whatsapp_business_messaging` + `whatsapp_business_management` → generate permanent token.
+5. Grab from the dashboard: `PHONE_NUMBER_ID`, `ACCESS_TOKEN`, `APP_SECRET` (App Settings → Basic).
+6. Put secrets in `.env` (`WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` — the last is arbitrary, you invent it).
+7. Fill the `whatsapp:` block in `config.yaml` (`phone_number_id`, `allowed_senders`, `onedrive_folder_name`).
+8. **Public URL** — easiest is Tailscale Funnel: `tailscale funnel --bg 8321` → gives you a `https://<host>.ts.net/` URL.
+9. **Meta dashboard → WhatsApp → Configuration → Webhook** → paste `https://<host>.ts.net/webhook` + the verify token → subscribe to the `messages` field.
+10. Start the service: `systemctl --user enable --now invoice-bot-whatsapp`.
+
+Media URLs returned by the Graph API expire in ~5 minutes, so the webhook
+downloads inline before handing off to `manual_source.run()`.
 
 ## Conventions
 
