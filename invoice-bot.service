@@ -2,6 +2,7 @@
 Description=Invoice Bot — automated invoice classifier and uploader
 After=network-online.target
 Wants=network-online.target
+OnFailure=notify-failure@%n.service
 
 [Service]
 Type=simple
