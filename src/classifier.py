@@ -280,11 +280,46 @@ def _parse_amount(value) -> float | None:
         return None
 
 
+def _extract_json_object(raw: str) -> str:
+    """Pull the first balanced {...} JSON object out of a free-form response.
+
+    The vision/Read-tool path makes Claude narrate what it read (sometimes inside
+    a <document> wrapper echoing the system prompt's safety framing) before the
+    JSON, so we can't rely on the JSON being at the start. Scan for the first
+    '{' and walk forward tracking brace depth, ignoring braces inside strings.
+    """
+    start = raw.find("{")
+    if start == -1:
+        raise ValueError("no JSON object found in response")
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start : i + 1]
+    raise ValueError("unbalanced JSON object in response")
+
+
 def _parse_response(raw: str, owner_names: set[str] | None = None) -> _ClassifyResult:
     """Parse Claude's JSON response."""
     try:
-        clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        data = json.loads(clean)
+        data = json.loads(_extract_json_object(raw))
         is_inv = bool(data.get("is_invoice", True))
         conf = float(data.get("confidence", 0.5))
         reason = str(data.get("reason", ""))
