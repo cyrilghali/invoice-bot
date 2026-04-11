@@ -1,14 +1,16 @@
 [Unit]
-Description=Invoice Bot — WhatsApp Cloud API webhook receiver
+Description=Invoice Bot — Telegram long-polling bot
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/cyrilghali/repos/invoice-bot
-ExecStart=/usr/bin/python3 -m uvicorn sources.whatsapp_webhook:app --app-dir src --host 127.0.0.1 --port 8321
+ExecStart=/usr/bin/python3 -m sources.telegram_bot
 EnvironmentFile=/home/cyrilghali/repos/invoice-bot/.env
 Environment=PATH=/home/cyrilghali/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH=/home/cyrilghali/repos/invoice-bot/src
+Environment=PYTHONUNBUFFERED=1
 
 # Auto-restart on any failure, with increasing delay
 Restart=on-failure

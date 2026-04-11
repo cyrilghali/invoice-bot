@@ -92,30 +92,27 @@ sources:
   #   password_env: "CEGEDIM_PASS"
 
 # ---------------------------------------------------------------------------
-# WhatsApp Cloud API webhook — push-based, not under `sources:`.
-# Runs as its own FastAPI/uvicorn process via invoice-bot-whatsapp.service.
+# Telegram bot — push-based, not under `sources:`.
+# Runs as its own Python process via invoice-bot-telegram.service using
+# Telegram Bot API long-polling. No webhook, no public URL, no Cloud API.
 #
-# Secrets come from env vars (see .env.example):
-#   WHATSAPP_ACCESS_TOKEN, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET
-#
-# See CLAUDE.md → "WhatsApp Cloud API setup" for the Meta dashboard walkthrough.
+# Secret: TELEGRAM_BOT_TOKEN env var (see .env.example).
+# See CLAUDE.md → "Telegram bot setup" for the @BotFather walkthrough.
 # ---------------------------------------------------------------------------
-# whatsapp:
-#   # Phone number ID from Meta dashboard (not the phone number itself)
-#   phone_number_id: "123456789012345"
-#
-#   # Only accept messages from these numbers (full international format, no +)
+# telegram:
+#   # Telegram numeric user IDs allowed to send invoices.
+#   # Find yours by messaging @userinfobot on Telegram.
 #   # Leave empty to accept from anyone — not recommended.
 #   allowed_senders:
-#     - "33612345678"  # Papa
+#     - 123456789  # Papa
 #
-#   # OneDrive destination for WhatsApp-sourced invoices. Falls back to
+#   # OneDrive destination for Telegram-sourced invoices. Falls back to
 #   # onedrive.folder_name if omitted.
 #   onedrive_folder_name: "YOUR_FOLDER_NAME_HERE"
 #   # onedrive_account: "colisee.ghali@hotmail.com"
 #
-#   # Label used when the sender has no WhatsApp profile name set.
-#   default_sender: "whatsapp"
+#   # Label used when the sender has no Telegram username set.
+#   default_sender: "telegram"
 
 # ---------------------------------------------------------------------------
 # Shared settings

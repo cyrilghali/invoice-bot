@@ -10,13 +10,13 @@ systemctl --user start invoice-bot
 systemctl --user status invoice-bot
 journalctl --user -u invoice-bot -f   # live logs
 
-# WhatsApp webhook receiver — separate service (push-based, not APScheduler)
-systemctl --user start invoice-bot-whatsapp
-journalctl --user -u invoice-bot-whatsapp -f
+# Telegram bot — separate service (long-polling, no webhook)
+systemctl --user start invoice-bot-telegram
+journalctl --user -u invoice-bot-telegram -f
 
 # Development — foreground
 python3 src/main.py
-uvicorn sources.whatsapp_webhook:app --app-dir src --port 8321  # whatsapp webhook
+python3 -m sources.telegram_bot  # telegram bot (long-polling)
 
 # Run a single source externally (for heavy scrapers via systemd timer/cron)
 python3 -m sources.run <instance_name>
@@ -38,10 +38,10 @@ python3 src/auth_setup.py
 # 4. Install systemd services
 mkdir -p ~/.config/systemd/user
 cp invoice-bot.service ~/.config/systemd/user/
-cp invoice-bot-whatsapp.service ~/.config/systemd/user/  # if using WhatsApp
+cp invoice-bot-telegram.service ~/.config/systemd/user/  # if using Telegram
 systemctl --user daemon-reload
 systemctl --user enable --now invoice-bot
-systemctl --user enable --now invoice-bot-whatsapp  # if using WhatsApp
+systemctl --user enable --now invoice-bot-telegram  # if using Telegram
 loginctl enable-linger $USER   # survive reboots without login
 ```
 
@@ -70,8 +70,8 @@ APScheduler (BlockingScheduler)          [invoice-bot.service]
     ├── db.py            → queries unreported invoices
     └── excel_exporter.py → builds Excel summary
 
-FastAPI + uvicorn                         [invoice-bot-whatsapp.service]
-└── sources/whatsapp_webhook.py — push-based, receives Meta webhook POSTs
+Python long-polling process               [invoice-bot-telegram.service]
+└── sources/telegram_bot.py — Telegram Bot API long-polling (getUpdates)
     └── reuses manual_source.run() → pipeline → OneDrive + DB
 ```
 
@@ -79,15 +79,17 @@ Sources with `interval_minutes` in config are scheduled by APScheduler.
 Sources without it are triggered externally via `python -m sources.run <name>`.
 Multiple instances of the same source module are supported (e.g. two email inboxes).
 
-The WhatsApp webhook is **not** a `sources:` entry — it lives under a top-level
-`whatsapp:` config block and runs as its own uvicorn process, so a webhook
-crash never takes down the polling scheduler. See "WhatsApp Cloud API setup"
-below for the one-time Meta dashboard walkthrough.
+The Telegram bot is **not** a `sources:` entry — it lives under a top-level
+`telegram:` config block and runs as its own process, so a bot crash never
+takes down the polling scheduler. It uses the standard Telegram Bot API with
+long-polling (`getUpdates`), so no webhook, no public URL, no ngrok. See
+"Telegram bot setup" below for the one-time @BotFather walkthrough.
 
 ## Key files
 
 - `src/main.py` — entry point, source auto-discovery, scheduler setup
 - `src/sources/email_source.py` — email inbox source (Microsoft Graph)
+- `src/sources/telegram_bot.py` — Telegram long-polling bot (its own service)
 - `src/sources/run.py` — CLI entry point for externally triggered sources
 - `src/classifier.py` — Claude CLI classification (uses `claude -p --model opus`)
 - `src/pipeline.py` — attachment classification and routing
@@ -106,23 +108,22 @@ below for the one-time Meta dashboard walkthrough.
 4. Use `db.is_document_processed()` / `db.mark_document_processed()` for dedup
 5. Call `db.save_source_run()` at the end for observability
 
-## WhatsApp Cloud API setup
+## Telegram bot setup
 
-One-time setup for the push-based `invoice-bot-whatsapp.service`:
+Telegram bots are free, instant, and don't need a phone number or public URL.
+Pure Python long-polling — no ngrok, no Cloud API dashboard, no rotating tokens.
 
-1. **Meta Business** → business.facebook.com → create account.
-2. **developers.facebook.com** → Create App → "Business" → add "WhatsApp" product.
-3. **WhatsApp → API Setup** → add and verify phone number (warning: the number can no longer be used with regular WhatsApp once verified).
-4. **Business Settings → Users → System Users** → create one → assign permissions `whatsapp_business_messaging` + `whatsapp_business_management` → generate permanent token.
-5. Grab from the dashboard: `PHONE_NUMBER_ID`, `ACCESS_TOKEN`, `APP_SECRET` (App Settings → Basic).
-6. Put secrets in `.env` (`WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` — the last is arbitrary, you invent it).
-7. Fill the `whatsapp:` block in `config.yaml` (`phone_number_id`, `allowed_senders`, `onedrive_folder_name`).
-8. **Public URL** — easiest is Tailscale Funnel: `tailscale funnel --bg 8321` → gives you a `https://<host>.ts.net/` URL.
-9. **Meta dashboard → WhatsApp → Configuration → Webhook** → paste `https://<host>.ts.net/webhook` + the verify token → subscribe to the `messages` field.
-10. Start the service: `systemctl --user enable --now invoice-bot-whatsapp`.
+One-time setup:
 
-Media URLs returned by the Graph API expire in ~5 minutes, so the webhook
-downloads inline before handing off to `manual_source.run()`.
+1. On Telegram, message [@BotFather](https://t.me/botfather) → `/newbot` → pick a name and username. BotFather returns a token like `123456:ABC-DEF...`.
+2. Put it in `.env`: `TELEGRAM_BOT_TOKEN=123456:ABC-DEF...`
+3. Open your bot in Telegram (search the username BotFather gave you) and send it any message so Telegram knows you exist.
+4. Find your numeric user ID: message [@userinfobot](https://t.me/userinfobot), or run the bot once (`python3 -m sources.telegram_bot`) and check the log — it logs every incoming sender ID.
+5. Fill the `telegram:` block in `config.yaml` (`allowed_senders`, `onedrive_folder_name`).
+6. Start the service: `systemctl --user enable --now invoice-bot-telegram`.
+
+Forward or send any PDF/photo to the bot and it replies `Reçu ✅` once the
+pipeline finishes. Non-allowlisted users get a rejection message.
 
 ## Conventions
 
