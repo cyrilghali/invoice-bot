@@ -139,6 +139,50 @@ def is_document_processed(data_dir: str, source_name: str, source_id: str) -> bo
         return row is not None
 
 
+def get_invoice_by_source_document_id(
+    data_dir: str, source_name: str, source_document_id: str
+) -> dict | None:
+    """Look up the invoice row for a previously-processed source document.
+
+    Used when a source wants to show the user where the existing file lives
+    (filename, OneDrive link) instead of silently skipping a duplicate.
+    """
+    with _connect(data_dir) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM invoices
+            WHERE source_name = ? AND source_document_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (source_name, source_document_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def forget_document(
+    data_dir: str, source_name: str, source_id: str
+) -> None:
+    """Drop the dedup row and any unreported invoice linked to it.
+
+    Reported invoices are left intact so monthly reports stay reproducible —
+    we want re-processing to create a fresh row rather than mutate history.
+    """
+    with _connect(data_dir) as conn:
+        conn.execute(
+            "DELETE FROM processed_documents WHERE source_name = ? AND source_id = ?",
+            (source_name, source_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM invoices
+            WHERE source_name = ? AND source_document_id = ? AND reported = 0
+            """,
+            (source_name, source_id),
+        )
+        conn.commit()
+        logger.info("Forgot document: source=%s id=%s", source_name, source_id)
+
+
 def mark_document_processed(
     data_dir: str,
     source_name: str,

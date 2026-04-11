@@ -92,6 +92,33 @@ def _headers(client_id: str, account_hint: str | None = None) -> dict:
     }
 
 
+def file_exists_by_id(client_id: str, file_id: str, account_hint: str | None = None) -> bool:
+    """Return True iff a OneDrive item with this ID still exists (not deleted).
+
+    Used by sources that want to double-check the DB's record of an earlier
+    upload against reality — the user may have deleted the file manually, in
+    which case the dedup row is stale and the document should be re-processed.
+    """
+    try:
+        resp = requests.get(
+            f"{GRAPH_BASE}/me/drive/items/{file_id}?$select=id",
+            headers=_headers(client_id, account_hint),
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        # Network blip — treat as "exists" so we don't wrongly re-upload on a
+        # transient Graph outage. The next real dedup hit will recheck.
+        logger.warning("file_exists_by_id: Graph request failed for %s: %s — assuming exists", file_id, e)
+        return True
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 404:
+        return False
+    # 401/403 shouldn't happen with a valid token, but don't purge on those.
+    logger.warning("file_exists_by_id: unexpected %d for %s — assuming exists", resp.status_code, file_id)
+    return True
+
+
 def _get_or_create_folder(client_id: str, parent_path: str, name: str, account_hint: str | None = None) -> str:
     """
     Return the OneDrive item ID of a folder named `name` under `parent_path`.

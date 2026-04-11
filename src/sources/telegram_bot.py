@@ -21,6 +21,7 @@ Run manually:
     python3 -m sources.telegram_bot
 """
 
+import hashlib
 import logging
 import mimetypes
 import os
@@ -33,6 +34,7 @@ from typing import Any
 import requests
 
 import db
+import onedrive_uploader
 from sources import manual_source
 from utils import DEFAULT_DATA_DIR, load_config, sanitize_filename, setup_logging
 
@@ -132,6 +134,70 @@ def _extract_media(message: dict) -> tuple[str, str] | None:
     return None
 
 
+def _check_existing_on_drive(
+    filepath: str, cfg: dict, data_dir: str
+) -> tuple[str, str | None]:
+    """Pre-check whether this file was already processed.
+
+    Returns one of:
+      ("exists", "<human message>")  — already in DB AND still on OneDrive;
+                                        caller should skip and reply with msg
+      ("stale", None)                — DB says processed but OneDrive file is
+                                        gone; caller should proceed and
+                                        re-process (DB has been cleaned)
+      ("new", None)                  — never processed; caller should proceed
+    """
+    with open(filepath, "rb") as f:
+        source_id = hashlib.sha256(f.read()).hexdigest()
+
+    if not db.is_document_processed(data_dir, "telegram", source_id):
+        return "new", None
+
+    invoice = db.get_invoice_by_source_document_id(data_dir, "telegram", source_id)
+
+    # Dedup row with no matching invoice row = the file went to _a_verifier
+    # last time (classifier said review/rejected). Nothing to verify on drive;
+    # let the pipeline handle it again so the user gets a real answer.
+    if not invoice or not invoice.get("drive_file_id"):
+        db.forget_document(data_dir, "telegram", source_id)
+        logger.info("Prior run had no invoice row for %s — re-processing", source_id[:12])
+        return "stale", None
+
+    tg = cfg.get("telegram") or {}
+    client_id = (
+        tg.get("client_id")
+        or (cfg.get("microsoft") or {}).get("client_id")
+        or os.environ.get("AZURE_CLIENT_ID")
+    )
+    account_hint = tg.get("onedrive_account")
+
+    still_there = onedrive_uploader.file_exists_by_id(
+        client_id, invoice["drive_file_id"], account_hint=account_hint
+    )
+    if not still_there:
+        logger.info(
+            "OneDrive file %s for %s is gone — purging dedup and re-processing",
+            invoice["drive_file_id"], source_id[:12],
+        )
+        db.forget_document(data_dir, "telegram", source_id)
+        return "stale", None
+
+    msg = _format_existing_message(invoice)
+    return "exists", msg
+
+
+def _format_existing_message(invoice: dict) -> str:
+    """Build a user-facing reply describing where the existing file lives."""
+    year = invoice.get("year")
+    month = invoice.get("month")
+    supplier = invoice.get("supplier") or "_a_verifier"
+    filename = invoice.get("filename") or "?"
+    path = f"{year}/{month:02d}/{supplier}/{filename}" if year and month else filename
+    link = invoice.get("drive_web_link")
+    base = f"⏭️ Déjà traité : {path}"
+    return f"{base}\n{link}" if link else base
+
+
 def _run_pipeline(filepath: str, sender_label: str, cfg: dict, data_dir: str) -> tuple[bool, str]:
     tg = cfg.get("telegram") or {}
     client_id = (
@@ -195,8 +261,12 @@ def _handle_message(message: dict, token: str, cfg: dict, data_dir: str) -> None
     sender_label = frm.get("username") or frm.get("first_name") or f"telegram:{user_id}"
     logger.info("Processing %s from %s (%s)", os.path.basename(filepath), user_id, sender_label)
 
-    ok, reason = _run_pipeline(filepath, sender_label, cfg, data_dir)
-    _send_text(token, chat_id, "Reçu ✅" if ok else f"❌ Erreur: {reason}")
+    state, existing_msg = _check_existing_on_drive(filepath, cfg, data_dir)
+    if state == "exists":
+        _send_text(token, chat_id, existing_msg)
+    else:
+        ok, reason = _run_pipeline(filepath, sender_label, cfg, data_dir)
+        _send_text(token, chat_id, "Reçu ✅" if ok else f"❌ Erreur: {reason}")
 
     try:
         os.unlink(filepath)
