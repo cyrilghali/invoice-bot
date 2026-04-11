@@ -97,11 +97,19 @@ class TestUnpackZip:
 # ---------------------------------------------------------------------------
 
 class TestProcessAttachment:
+    @staticmethod
+    def _disable_cross_source_dedup(mock_db):
+        """Pipeline calls db.is_content_already_invoiced() before classification.
+        A raw MagicMock returns a truthy MagicMock by default, which would
+        short-circuit every test into the 'duplicate' path. Force None."""
+        mock_db.is_content_already_invoiced.return_value = None
+
     @patch("pipeline.db")
     @patch("pipeline.upload_attachment", return_value=("file-id", "https://link"))
     @patch("pipeline.build_filename", return_value="2025-03-15_example_inv.pdf")
     @patch("pipeline.is_invoice", return_value=("invoice", "2025-03-15", "Acme", None, 100.0, 120.0, 20.0, "EUR"))
     def test_invoice_uploaded_and_saved(self, mock_classify, mock_fname, mock_upload, mock_db):
+        self._disable_cross_source_dedup(mock_db)
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
         status = process_attachment(
@@ -121,6 +129,7 @@ class TestProcessAttachment:
     @patch("pipeline.build_filename", return_value="2025-03-15_example_contract.pdf")
     @patch("pipeline.is_invoice", return_value=("rejected", None, None, None, None, None, None, None))
     def test_rejected_not_uploaded(self, mock_classify, mock_fname, mock_upload, mock_db):
+        self._disable_cross_source_dedup(mock_db)
         att = Attachment(name="contract.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
         status = process_attachment(
@@ -137,6 +146,7 @@ class TestProcessAttachment:
     @patch("pipeline.build_filename", return_value="2025-03-15_example_maybe.pdf")
     @patch("pipeline.is_invoice", return_value=("review", None, None, None, None, None, None, None))
     def test_review_uploaded_to_review(self, mock_classify, mock_fname, mock_upload, mock_db):
+        self._disable_cross_source_dedup(mock_db)
         att = Attachment(name="maybe.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
         status = process_attachment(
@@ -152,6 +162,7 @@ class TestProcessAttachment:
     @patch("pipeline.build_filename", return_value="2025-01-20_acme_inv.pdf")
     @patch("pipeline.is_invoice", return_value=("invoice", "2025-01-20", "Acme", None, 100.0, 120.0, 20.0, "EUR"))
     def test_invoice_date_overrides_year_month(self, mock_classify, mock_fname, mock_upload, mock_db):
+        self._disable_cross_source_dedup(mock_db)
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
         # email received in March, but invoice date is January
@@ -171,6 +182,7 @@ class TestProcessAttachment:
     @patch("pipeline.build_filename", return_value="fname.pdf")
     @patch("pipeline.is_invoice")
     def test_zip_processes_members(self, mock_classify, mock_fname, mock_review, mock_upload, mock_db):
+        self._disable_cross_source_dedup(mock_db)
         # First call -> invoice, second call -> rejected
         mock_classify.side_effect = [
             ("invoice", "2025-03-01", "Acme", None, 100.0, 120.0, 20.0, "EUR"),
@@ -204,10 +216,35 @@ class TestProcessAttachment:
         mock_classify.assert_not_called()
 
     @patch("pipeline.db")
+    @patch("pipeline.upload_attachment")
+    @patch("pipeline.upload_to_review")
+    @patch("pipeline.is_invoice")
+    def test_duplicate_short_circuits_before_classification(
+        self, mock_classify, mock_review, mock_upload, mock_db,
+    ):
+        """Cross-source dedup must fire before any classifier or upload call."""
+        mock_db.is_content_already_invoiced.return_value = {
+            "id": 42, "filename": "old.pdf", "source_name": "email",
+        }
+        att = Attachment(name="same.pdf", content_type="application/pdf", content_bytes=b"%PDF")
+
+        status = process_attachment(
+            att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
+            year=2025, month=3, config={}, data_dir="/data", client_id="cid",
+            root_folder_name="Root",
+        )
+        assert status == "duplicate"
+        mock_classify.assert_not_called()
+        mock_upload.assert_not_called()
+        mock_review.assert_not_called()
+        mock_db.save_invoice.assert_not_called()
+
+    @patch("pipeline.db")
     @patch("pipeline.upload_attachment", return_value=("fid", "https://link"))
     @patch("pipeline.build_filename", return_value="fname.pdf")
     @patch("pipeline.is_invoice", return_value=("invoice", None, None, None, None, None, None, None))
     def test_sender_supplier_hint_used(self, mock_classify, mock_fname, mock_upload, mock_db):
+        self._disable_cross_source_dedup(mock_db)
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {
             "invoices": {
