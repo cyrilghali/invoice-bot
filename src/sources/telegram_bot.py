@@ -21,6 +21,7 @@ Run manually:
     python3 -m sources.telegram_bot
 """
 
+import contextlib
 import hashlib
 import logging
 import mimetypes
@@ -28,6 +29,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 
@@ -84,6 +86,47 @@ def _send_text(token: str, chat_id: int, text: str, parse_mode: str | None = Non
         requests.post(_api_url(token, "sendMessage"), json=payload, timeout=15)
     except Exception as e:
         logger.warning("sendMessage failed for chat %s: %s", chat_id, e)
+
+
+def _send_chat_action(token: str, chat_id: int, action: str = "typing") -> None:
+    """Best-effort chat action (shows 'typing…' indicator in the client).
+
+    Telegram's typing indicator lasts ~5 seconds, so long-running work needs
+    to refresh it — see _typing_loop.
+    """
+    try:
+        requests.post(
+            _api_url(token, "sendChatAction"),
+            json={"chat_id": chat_id, "action": action},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.debug("sendChatAction failed for chat %s: %s", chat_id, e)
+
+
+@contextlib.contextmanager
+def _typing_loop(token: str, chat_id: int, interval: float = 4.0):
+    """Keep the 'typing…' indicator alive in the chat while the body runs.
+
+    Fires sendChatAction immediately so the indicator shows without waiting
+    for the first tick, then refreshes every `interval` seconds until the
+    context exits. Runs on a daemon thread so a crash in the pipeline can't
+    leave it dangling past process exit.
+    """
+    stop = threading.Event()
+
+    def loop() -> None:
+        _send_chat_action(token, chat_id, "typing")
+        while not stop.wait(interval):
+            _send_chat_action(token, chat_id, "typing")
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
 
 
 def _download_file(token: str, file_id: str, suggested_name: str, data_dir: str) -> str:
@@ -195,7 +238,10 @@ def _format_existing_message(invoice: dict) -> str:
     return f'⏭️ Déjà traité, vous pouvez le retrouver <a href="{invoice["drive_web_link"]}">ici</a>.'
 
 
-def _run_pipeline(filepath: str, sender_label: str, cfg: dict, data_dir: str) -> tuple[bool, str]:
+def _run_pipeline(
+    filepath: str, sender_label: str, cfg: dict, data_dir: str
+) -> tuple[bool, str, dict | None]:
+    """Run the pipeline and return (ok, reason, existing_invoice_on_duplicate)."""
     tg = cfg.get("telegram") or {}
     client_id = (
         tg.get("client_id")
@@ -205,7 +251,7 @@ def _run_pipeline(filepath: str, sender_label: str, cfg: dict, data_dir: str) ->
     root_folder_name = tg.get("onedrive_folder_name") or (cfg.get("onedrive") or {}).get("folder_name")
 
     if not client_id or not root_folder_name:
-        return False, "missing client_id or onedrive folder in config"
+        return False, "missing client_id or onedrive folder in config", None
 
     instance_config = {
         "source_name": "telegram",
@@ -220,11 +266,15 @@ def _run_pipeline(filepath: str, sender_label: str, cfg: dict, data_dir: str) ->
     }
 
     try:
-        manual_source.run(instance_config, data_dir)
+        results = manual_source.run(instance_config, data_dir) or []
     except Exception as e:
         logger.error("Pipeline crashed: %s", e, exc_info=True)
-        return False, str(e)
-    return True, "ok"
+        return False, str(e), None
+
+    first = results[0] if results else None
+    if first and first.get("status") == "duplicate" and first.get("existing"):
+        return True, "duplicate", first["existing"]
+    return True, "ok", None
 
 
 def _handle_message(message: dict, token: str, cfg: dict, data_dir: str) -> None:
@@ -262,8 +312,12 @@ def _handle_message(message: dict, token: str, cfg: dict, data_dir: str) -> None
     if state == "exists":
         _send_text(token, chat_id, existing_msg, parse_mode="HTML")
     else:
-        ok, reason = _run_pipeline(filepath, sender_label, cfg, data_dir)
-        _send_text(token, chat_id, "Reçu ✅" if ok else f"❌ Erreur: {reason}")
+        with _typing_loop(token, chat_id):
+            ok, reason, existing = _run_pipeline(filepath, sender_label, cfg, data_dir)
+        if ok and reason == "duplicate" and existing and existing.get("drive_web_link"):
+            _send_text(token, chat_id, _format_existing_message(existing), parse_mode="HTML")
+        else:
+            _send_text(token, chat_id, "Reçu ✅" if ok else f"❌ Erreur: {reason}")
 
     try:
         os.unlink(filepath)
