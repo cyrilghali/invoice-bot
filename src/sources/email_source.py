@@ -102,7 +102,7 @@ def run(config: dict, data_dir: str) -> None:
 
             for attachment in email.attachments:
                 try:
-                    status = process_attachment(
+                    result = process_attachment(
                         attachment=attachment,
                         sender=email.sender,
                         received_at=email.received_at,
@@ -116,7 +116,7 @@ def run(config: dict, data_dir: str) -> None:
                         source_document_id=source_id,
                         account_hint=upload_account_hint,
                     )
-                    if status == "invoice":
+                    if result.get("status") == "invoice":
                         invoices_saved += 1
                 except Exception as e:
                     logger.error(

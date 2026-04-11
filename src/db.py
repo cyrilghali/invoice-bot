@@ -3,6 +3,7 @@ SQLite database layer for deduplication and invoice tracking.
 """
 
 import contextlib
+import re
 import sqlite3
 import logging
 from datetime import datetime, timezone
@@ -227,6 +228,58 @@ def is_content_already_invoiced(data_dir: str, content_hash: str) -> dict | None
             )
             return result
         return None
+
+
+def _normalize_supplier(s: str | None) -> str:
+    """Lowercase + strip non-alphanumerics so supplier strings can be compared.
+
+    'Boucherie Hallal Italie 3b' → 'boucheriehallalitalie3b'
+    'Boucherie Hallal'           → 'boucheriehallal'
+    """
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def find_invoice_by_fingerprint(
+    data_dir: str,
+    supplier: str | None,
+    invoice_date: str | None,
+    amount_ttc: float | None,
+) -> dict | None:
+    """Find an existing invoice that represents the same real-world document.
+
+    A fingerprint match is (same invoice_date, same amount_ttc within 1 cent,
+    overlapping supplier prefix). This catches re-photographed or re-compressed
+    versions of the same receipt — cases where content-hash dedup fails because
+    the bytes differ but the extracted fields are identical.
+    """
+    if not supplier or not invoice_date or amount_ttc is None:
+        return None
+    norm = _normalize_supplier(supplier)
+    if not norm:
+        return None
+    with _connect(data_dir) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM invoices
+            WHERE invoice_date = ?
+              AND amount_ttc IS NOT NULL
+              AND ABS(amount_ttc - ?) < 0.01
+            ORDER BY id ASC
+            """,
+            (invoice_date, float(amount_ttc)),
+        ).fetchall()
+    for row in rows:
+        other = _normalize_supplier(row["supplier"])
+        if not other:
+            continue
+        if norm == other or norm.startswith(other) or other.startswith(norm):
+            match = dict(row)
+            logger.info(
+                "Fingerprint match: id=%d supplier=%r date=%s amount_ttc=%s",
+                match["id"], match.get("supplier"), invoice_date, amount_ttc,
+            )
+            return match
+    return None
 
 
 # ---------------------------------------------------------------------------

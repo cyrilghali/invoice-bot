@@ -77,7 +77,7 @@ class TestManualSourceRun:
     @patch("sources.manual_source.process_attachment")
     def test_processes_single_file(self, mock_process, data_dir, sample_pdf):
         """A valid file should be passed to process_attachment."""
-        mock_process.return_value = "invoice"
+        mock_process.return_value = {"status": "invoice", "existing": None}
 
         config = self._base_config()
         config["_files"] = [sample_pdf]
@@ -93,7 +93,7 @@ class TestManualSourceRun:
     @patch("sources.manual_source.process_attachment")
     def test_dedup_skips_same_file(self, mock_process, data_dir, sample_pdf):
         """Processing the same file twice should skip the second time."""
-        mock_process.return_value = "invoice"
+        mock_process.return_value = {"status": "invoice", "existing": None}
 
         config = self._base_config()
         config["_files"] = [sample_pdf]
@@ -108,7 +108,7 @@ class TestManualSourceRun:
     @patch("sources.manual_source.process_attachment")
     def test_custom_sender(self, mock_process, data_dir, sample_pdf):
         """--sender should override default_sender."""
-        mock_process.return_value = "invoice"
+        mock_process.return_value = {"status": "invoice", "existing": None}
 
         config = self._base_config()
         config["_files"] = [sample_pdf]
@@ -157,7 +157,7 @@ class TestManualSourceRun:
     @patch("sources.manual_source.process_attachment")
     def test_source_run_saved(self, mock_process, data_dir, sample_pdf):
         """Each run should be tracked in source_runs table."""
-        mock_process.return_value = "invoice"
+        mock_process.return_value = {"status": "invoice", "existing": None}
 
         config = self._base_config()
         config["_files"] = [sample_pdf]
@@ -173,7 +173,7 @@ class TestManualSourceRun:
     @patch("sources.manual_source.process_attachment")
     def test_multiple_files(self, mock_process, data_dir, tmp_path):
         """Multiple files should each be processed."""
-        mock_process.return_value = "invoice"
+        mock_process.return_value = {"status": "invoice", "existing": None}
 
         files = []
         for i in range(3):

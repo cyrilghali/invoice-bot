@@ -57,7 +57,7 @@ def _guess_content_type(filepath: str) -> str:
     return ct or "application/pdf"
 
 
-def run(config: dict, data_dir: str) -> None:
+def run(config: dict, data_dir: str) -> list[dict]:
     """
     Process one or more local files through the invoice pipeline.
 
@@ -72,7 +72,7 @@ def run(config: dict, data_dir: str) -> None:
     if not files:
         logger.error("No files to process. Use --file <path> to specify files.")
         print("Error: no files to process. Use --file <path>", file=sys.stderr)
-        return
+        return []
 
     sender = config.get("_sender") or config.get("default_sender", "manual")
     client_id: str = config["client_id"]
@@ -134,7 +134,7 @@ def run(config: dict, data_dir: str) -> None:
             )
 
             try:
-                status = process_attachment(
+                outcome = process_attachment(
                     attachment=attachment,
                     sender=sender,
                     received_at=received_at,
@@ -148,9 +148,13 @@ def run(config: dict, data_dir: str) -> None:
                     source_document_id=source_id,
                     account_hint=upload_account_hint,
                 )
+                status = outcome.get("status")
                 if status == "invoice":
                     invoices_saved += 1
-                results.append({"file": filepath, "status": status})
+                entry = {"file": filepath, "status": status}
+                if outcome.get("existing"):
+                    entry["existing"] = outcome["existing"]
+                results.append(entry)
             except Exception as e:
                 logger.error("Failed to process %s: %s", filename, e, exc_info=True)
                 results.append({"file": filepath, "status": "error", "reason": str(e)})
@@ -192,3 +196,4 @@ def run(config: dict, data_dir: str) -> None:
         documents_found, documents_new, invoices_saved,
     )
     logger.info("========== %s: MANUAL PROCESSING END ==========\n", source_name)
+    return results

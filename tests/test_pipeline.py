@@ -112,12 +112,13 @@ class TestProcessAttachment:
         self._disable_cross_source_dedup(mock_db)
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
-        status = process_attachment(
+        mock_db.find_invoice_by_fingerprint.return_value = None
+        result = process_attachment(
             att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
             year=2025, month=3, config={}, data_dir="/data", client_id="cid",
             root_folder_name="Root", source_name="email", source_document_id="e1",
         )
-        assert status == "invoice"
+        assert result["status"] == "invoice"
         mock_upload.assert_called_once()
         mock_db.save_invoice.assert_called_once()
         # Verify source fields passed to save_invoice
@@ -132,12 +133,12 @@ class TestProcessAttachment:
         self._disable_cross_source_dedup(mock_db)
         att = Attachment(name="contract.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
-        status = process_attachment(
+        result = process_attachment(
             att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
             year=2025, month=3, config={}, data_dir="/data", client_id="cid",
             root_folder_name="Root",
         )
-        assert status == "rejected"
+        assert result["status"] == "rejected"
         mock_upload.assert_not_called()
         mock_db.save_invoice.assert_not_called()
 
@@ -149,12 +150,12 @@ class TestProcessAttachment:
         self._disable_cross_source_dedup(mock_db)
         att = Attachment(name="maybe.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
-        status = process_attachment(
+        result = process_attachment(
             att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
             year=2025, month=3, config={}, data_dir="/data", client_id="cid",
             root_folder_name="Root",
         )
-        assert status == "review"
+        assert result["status"] == "review"
         mock_upload.assert_called_once()
 
     @patch("pipeline.db")
@@ -163,15 +164,16 @@ class TestProcessAttachment:
     @patch("pipeline.is_invoice", return_value=("invoice", "2025-01-20", "Acme", None, 100.0, 120.0, 20.0, "EUR"))
     def test_invoice_date_overrides_year_month(self, mock_classify, mock_fname, mock_upload, mock_db):
         self._disable_cross_source_dedup(mock_db)
+        mock_db.find_invoice_by_fingerprint.return_value = None
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
         # email received in March, but invoice date is January
-        status = process_attachment(
+        result = process_attachment(
             att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
             year=2025, month=3, config={}, data_dir="/data", client_id="cid",
             root_folder_name="Root",
         )
-        assert status == "invoice"
+        assert result["status"] == "invoice"
         call_kwargs = mock_upload.call_args
         assert call_kwargs.kwargs.get("year") or call_kwargs[1].get("year") == 2025
         assert call_kwargs.kwargs.get("month") or call_kwargs[1].get("month") == 1
@@ -183,6 +185,7 @@ class TestProcessAttachment:
     @patch("pipeline.is_invoice")
     def test_zip_processes_members(self, mock_classify, mock_fname, mock_review, mock_upload, mock_db):
         self._disable_cross_source_dedup(mock_db)
+        mock_db.find_invoice_by_fingerprint.return_value = None
         # First call -> invoice, second call -> rejected
         mock_classify.side_effect = [
             ("invoice", "2025-03-01", "Acme", None, 100.0, 120.0, 20.0, "EUR"),
@@ -194,12 +197,12 @@ class TestProcessAttachment:
         )
         att = Attachment(name="bundle.zip", content_type="application/zip", content_bytes=zip_bytes)
 
-        status = process_attachment(
+        result = process_attachment(
             att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
             year=2025, month=3, config={}, data_dir="/data", client_id="cid",
             root_folder_name="Root",
         )
-        assert status == "invoice"  # at least one member was an invoice
+        assert result["status"] == "invoice"  # at least one member was an invoice
         assert mock_classify.call_count == 2
 
     @patch("pipeline.is_invoice")
@@ -207,12 +210,12 @@ class TestProcessAttachment:
         zip_bytes = _make_zip()  # empty archive
         att = Attachment(name="empty.zip", content_type="application/zip", content_bytes=zip_bytes)
 
-        status = process_attachment(
+        result = process_attachment(
             att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
             year=2025, month=3, config={}, data_dir="/data", client_id="cid",
             root_folder_name="Root",
         )
-        assert status == "rejected"
+        assert result["status"] == "rejected"
         mock_classify.assert_not_called()
 
     @patch("pipeline.db")
@@ -228,15 +231,40 @@ class TestProcessAttachment:
         }
         att = Attachment(name="same.pdf", content_type="application/pdf", content_bytes=b"%PDF")
 
-        status = process_attachment(
+        result = process_attachment(
             att, sender="billing@example.com", received_at="2025-03-15T10:00:00Z",
             year=2025, month=3, config={}, data_dir="/data", client_id="cid",
             root_folder_name="Root",
         )
-        assert status == "duplicate"
+        assert result["status"] == "duplicate"
+        assert result["existing"]["id"] == 42
         mock_classify.assert_not_called()
         mock_upload.assert_not_called()
         mock_review.assert_not_called()
+        mock_db.save_invoice.assert_not_called()
+
+    @patch("pipeline.db")
+    @patch("pipeline.upload_attachment")
+    @patch("pipeline.build_filename", return_value="fname.pdf")
+    @patch("pipeline.is_invoice", return_value=("invoice", "2026-04-11", "Boucherie Hallal", None, 134.64, 142.05, 7.41, "EUR"))
+    def test_fingerprint_duplicate_skips_upload(self, mock_classify, mock_fname, mock_upload, mock_db):
+        """Reclassified near-duplicate (different bytes, same extracted fields)
+        should skip upload and save, and return the existing invoice."""
+        self._disable_cross_source_dedup(mock_db)
+        mock_db.find_invoice_by_fingerprint.return_value = {
+            "id": 7, "supplier": "Boucherie Hallal Italie 3b",
+            "drive_file_id": "fid", "drive_web_link": "https://link/old",
+        }
+        att = Attachment(name="rephoto.jpg", content_type="image/jpeg", content_bytes=b"\xff\xd8new-bytes")
+
+        result = process_attachment(
+            att, sender="telegram:ihab", received_at="2026-04-11T22:00:00Z",
+            year=2026, month=4, config={}, data_dir="/data", client_id="cid",
+            root_folder_name="Root",
+        )
+        assert result["status"] == "duplicate"
+        assert result["existing"]["id"] == 7
+        mock_upload.assert_not_called()
         mock_db.save_invoice.assert_not_called()
 
     @patch("pipeline.db")
@@ -245,6 +273,7 @@ class TestProcessAttachment:
     @patch("pipeline.is_invoice", return_value=("invoice", None, None, None, None, None, None, None))
     def test_sender_supplier_hint_used(self, mock_classify, mock_fname, mock_upload, mock_db):
         self._disable_cross_source_dedup(mock_db)
+        mock_db.find_invoice_by_fingerprint.return_value = None
         att = Attachment(name="inv.pdf", content_type="application/pdf", content_bytes=b"%PDF")
         config = {
             "invoices": {

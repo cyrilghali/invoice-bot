@@ -82,14 +82,17 @@ def process_attachment(
     source_name: str | None = None,
     source_document_id: str | None = None,
     account_hint: str | None = None,
-) -> str:
+) -> dict:
     """
     Classify a single attachment and upload it to the appropriate OneDrive folder.
     ZIP files are unpacked and each member is processed individually — the ZIP
     itself is never uploaded.
 
-    Returns the status string: "invoice", "review", or "rejected".
-    For ZIPs, returns "invoice" if at least one member was an invoice.
+    Returns a dict: {"status": str, "existing": dict | None}. Status is one of
+    "invoice", "review", "rejected", or "duplicate". "existing" is populated
+    when the pipeline detected that this file represents an already-stored
+    invoice (either via content hash or via classifier-fingerprint match).
+    For ZIPs, returns status="invoice" if at least one member was an invoice.
 
     Raises on unexpected errors — callers should catch and log.
     """
@@ -100,12 +103,12 @@ def process_attachment(
         members = _unpack_zip(attachment)
         if not members:
             logger.info("ZIP %s: no supported members found, skipping", attachment.name)
-            return "rejected"
+            return {"status": "rejected", "existing": None}
         logger.info("ZIP %s: unpacking %d member(s) for individual classification", attachment.name, len(members))
         any_invoice = False
         for member in members:
             try:
-                member_status = process_attachment(
+                member_result = process_attachment(
                     attachment=member,
                     sender=sender,
                     received_at=received_at,
@@ -119,11 +122,11 @@ def process_attachment(
                     source_document_id=source_document_id,
                     account_hint=account_hint,
                 )
-                if member_status == "invoice":
+                if member_result.get("status") == "invoice":
                     any_invoice = True
             except Exception as e:
                 logger.error("Failed to process ZIP member %s: %s", member.name, e, exc_info=True)
-        return "invoice" if any_invoice else "rejected"
+        return {"status": "invoice" if any_invoice else "rejected", "existing": None}
 
     # --- Normal (non-ZIP) attachment ---
     logger.info(
@@ -142,7 +145,7 @@ def process_attachment(
             "DUPLICATE skipped: file=%r matches existing invoice id=%d (%s via %s)",
             attachment.name, existing["id"], existing["filename"], existing.get("source_name"),
         )
-        return "duplicate"
+        return {"status": "duplicate", "existing": existing}
 
     # Look up canonical supplier hint for this sender
     sender_key = sender.lower().strip()
@@ -193,6 +196,22 @@ def process_attachment(
     )
 
     if status == "invoice":
+        # Fingerprint dedup — catches re-photographed or re-compressed copies of
+        # the same real-world receipt where sha256 differs but extracted fields
+        # (supplier, date, total) are identical. Runs before upload so we don't
+        # pollute OneDrive with near-duplicates.
+        fingerprint_match = db.find_invoice_by_fingerprint(
+            data_dir, doc_supplier, invoice_date, amount_ttc
+        )
+        if fingerprint_match and fingerprint_match.get("drive_web_link"):
+            logger.info(
+                "FINGERPRINT DUPLICATE: file=%r matches existing invoice id=%d "
+                "supplier=%r date=%s amount_ttc=%s — skipping upload/save",
+                attachment.name, fingerprint_match["id"],
+                fingerprint_match.get("supplier"), invoice_date, amount_ttc,
+            )
+            return {"status": "duplicate", "existing": fingerprint_match}
+
         logger.info(
             "INVOICE confirmed: file=%r supplier=%r entity=%r invoice_date=%r "
             "amount_ht=%s amount_ttc=%s currency=%r folder=%s/%d/%02d",
@@ -259,4 +278,4 @@ def process_attachment(
     else:
         # rejected — confidently not an invoice (CGU, CGV, logos, etc.) — skip entirely
         logger.info("Rejected (not an invoice): file=%r from=%s — not uploaded", attachment.name, sender)
-    return status
+    return {"status": status, "existing": None}

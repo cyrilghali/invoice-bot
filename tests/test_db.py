@@ -218,6 +218,80 @@ class TestDocumentProcessing:
 # Invoice CRUD
 # ---------------------------------------------------------------------------
 
+class TestFindInvoiceByFingerprint:
+    def _save(self, data_dir, supplier, invoice_date, amount_ttc, source_id):
+        db.save_invoice(
+            data_dir,
+            filename=f"{source_id}.pdf",
+            sender="s@t.com",
+            received_at="2026-04-11T00:00:00Z",
+            year=2026,
+            month=4,
+            source_name="telegram",
+            source_document_id=source_id,
+            drive_file_id=f"drive-{source_id}",
+            drive_web_link=f"https://onedrive.example/{source_id}",
+            invoice_date=invoice_date,
+            supplier=supplier,
+            amount_ttc=amount_ttc,
+            currency="EUR",
+        )
+
+    def test_exact_match(self, initialized_db):
+        self._save(initialized_db, "Boucherie Hallal", "2026-04-11", 142.05, "t1")
+        hit = db.find_invoice_by_fingerprint(
+            initialized_db, "Boucherie Hallal", "2026-04-11", 142.05
+        )
+        assert hit is not None
+        assert hit["source_document_id"] == "t1"
+
+    def test_supplier_prefix_overlap(self, initialized_db):
+        """'Boucherie Hallal Italie 3b' should match a stored 'Boucherie Hallal'."""
+        self._save(initialized_db, "Boucherie Hallal", "2026-04-11", 142.05, "t1")
+        hit = db.find_invoice_by_fingerprint(
+            initialized_db, "Boucherie Hallal Italie 3b", "2026-04-11", 142.05
+        )
+        assert hit is not None
+        assert hit["source_document_id"] == "t1"
+
+    def test_reverse_prefix_overlap(self, initialized_db):
+        self._save(initialized_db, "Boucherie Hallal Italie 3b", "2026-04-11", 142.05, "t1")
+        hit = db.find_invoice_by_fingerprint(
+            initialized_db, "Boucherie Hallal", "2026-04-11", 142.05
+        )
+        assert hit is not None
+
+    def test_amount_cent_tolerance(self, initialized_db):
+        self._save(initialized_db, "Boucherie Hallal", "2026-04-11", 142.05, "t1")
+        hit = db.find_invoice_by_fingerprint(
+            initialized_db, "Boucherie Hallal", "2026-04-11", 142.049
+        )
+        assert hit is not None
+
+    def test_different_date_does_not_match(self, initialized_db):
+        self._save(initialized_db, "Boucherie Hallal", "2026-04-11", 142.05, "t1")
+        assert db.find_invoice_by_fingerprint(
+            initialized_db, "Boucherie Hallal", "2026-04-12", 142.05
+        ) is None
+
+    def test_different_amount_does_not_match(self, initialized_db):
+        self._save(initialized_db, "Boucherie Hallal", "2026-04-11", 142.05, "t1")
+        assert db.find_invoice_by_fingerprint(
+            initialized_db, "Boucherie Hallal", "2026-04-11", 99.99
+        ) is None
+
+    def test_unrelated_supplier_does_not_match(self, initialized_db):
+        self._save(initialized_db, "Boucherie Hallal", "2026-04-11", 142.05, "t1")
+        assert db.find_invoice_by_fingerprint(
+            initialized_db, "Carrefour", "2026-04-11", 142.05
+        ) is None
+
+    def test_missing_fields_returns_none(self, initialized_db):
+        assert db.find_invoice_by_fingerprint(initialized_db, None, "2026-04-11", 142.05) is None
+        assert db.find_invoice_by_fingerprint(initialized_db, "Acme", None, 142.05) is None
+        assert db.find_invoice_by_fingerprint(initialized_db, "Acme", "2026-04-11", None) is None
+
+
 class TestInvoiceCrud:
     def _save_sample(self, data_dir, source_name="email", source_id="e1",
                      filename="inv.pdf", month=3):

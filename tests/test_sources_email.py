@@ -33,7 +33,7 @@ def _base_config():
 
 class TestEmailSourceRun:
     @patch("sources.email_source.db")
-    @patch("sources.email_source.process_attachment", return_value="invoice")
+    @patch("sources.email_source.process_attachment", return_value={"status": "invoice", "existing": None})
     @patch("sources.email_source.GraphClient")
     def test_fetches_and_processes_new_emails(self, MockGraph, mock_process, mock_db):
         mock_db.is_document_processed.return_value = False
@@ -101,7 +101,7 @@ class TestEmailSourceRun:
         assert run_kwargs["status"] == "ok"  # source-level succeeded, attachment error is per-item
 
     @patch("sources.email_source.db")
-    @patch("sources.email_source.process_attachment", return_value="invoice")
+    @patch("sources.email_source.process_attachment", return_value={"status": "invoice", "existing": None})
     @patch("sources.email_source.GraphClient")
     def test_uses_internet_message_id_as_source_id(self, MockGraph, mock_process, mock_db):
         mock_db.is_document_processed.return_value = False
@@ -113,7 +113,7 @@ class TestEmailSourceRun:
         mock_db.is_document_processed.assert_called_with("/tmp/test-data", "test_inbox", "<stable-id@mail>")
 
     @patch("sources.email_source.db")
-    @patch("sources.email_source.process_attachment", return_value="invoice")
+    @patch("sources.email_source.process_attachment", return_value={"status": "invoice", "existing": None})
     @patch("sources.email_source.GraphClient")
     def test_falls_back_to_email_id_when_no_internet_message_id(self, MockGraph, mock_process, mock_db):
         mock_db.is_document_processed.return_value = False
@@ -125,7 +125,7 @@ class TestEmailSourceRun:
         mock_db.is_document_processed.assert_called_with("/tmp/test-data", "test_inbox", "e1")
 
     @patch("sources.email_source.db")
-    @patch("sources.email_source.process_attachment", return_value="invoice")
+    @patch("sources.email_source.process_attachment", return_value={"status": "invoice", "existing": None})
     @patch("sources.email_source.GraphClient")
     def test_reads_config_params(self, MockGraph, mock_process, mock_db):
         mock_db.is_document_processed.return_value = False
