@@ -76,13 +76,12 @@ def _get_updates(token: str, offset: int | None) -> list[dict]:
     return data.get("result") or []
 
 
-def _send_text(token: str, chat_id: int, text: str) -> None:
+def _send_text(token: str, chat_id: int, text: str, parse_mode: str | None = None) -> None:
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
-        requests.post(
-            _api_url(token, "sendMessage"),
-            json={"chat_id": chat_id, "text": text},
-            timeout=15,
-        )
+        requests.post(_api_url(token, "sendMessage"), json=payload, timeout=15)
     except Exception as e:
         logger.warning("sendMessage failed for chat %s: %s", chat_id, e)
 
@@ -155,12 +154,13 @@ def _check_existing_on_drive(
 
     invoice = db.get_invoice_by_source_document_id(data_dir, "telegram", source_id)
 
-    # Dedup row with no matching invoice row = the file went to _a_verifier
-    # last time (classifier said review/rejected). Nothing to verify on drive;
-    # let the pipeline handle it again so the user gets a real answer.
-    if not invoice or not invoice.get("drive_file_id"):
+    # Dedup row with no matching invoice, no drive ID, or no web link = the
+    # file either went to _a_verifier last time (classifier said review/rejected)
+    # or its DB row is incomplete. Either way there's nothing trustworthy to
+    # link to, so purge and re-process.
+    if not invoice or not invoice.get("drive_file_id") or not invoice.get("drive_web_link"):
         db.forget_document(data_dir, "telegram", source_id)
-        logger.info("Prior run had no invoice row for %s — re-processing", source_id[:12])
+        logger.info("Prior run had no usable invoice row for %s — re-processing", source_id[:12])
         return "stale", None
 
     tg = cfg.get("telegram") or {}
@@ -187,15 +187,12 @@ def _check_existing_on_drive(
 
 
 def _format_existing_message(invoice: dict) -> str:
-    """Build a user-facing reply describing where the existing file lives."""
-    year = invoice.get("year")
-    month = invoice.get("month")
-    supplier = invoice.get("supplier") or "_a_verifier"
-    filename = invoice.get("filename") or "?"
-    path = f"{year}/{month:02d}/{supplier}/{filename}" if year and month else filename
-    link = invoice.get("drive_web_link")
-    base = f"⏭️ Déjà traité : {path}"
-    return f"{base}\n{link}" if link else base
+    """HTML-formatted reply linking to the existing OneDrive file.
+
+    Caller must ensure drive_web_link is set — the pre-check treats a missing
+    link as a stale row and re-processes instead of reaching this function.
+    """
+    return f'⏭️ Déjà traité, vous pouvez le retrouver <a href="{invoice["drive_web_link"]}">ici</a>.'
 
 
 def _run_pipeline(filepath: str, sender_label: str, cfg: dict, data_dir: str) -> tuple[bool, str]:
@@ -263,7 +260,7 @@ def _handle_message(message: dict, token: str, cfg: dict, data_dir: str) -> None
 
     state, existing_msg = _check_existing_on_drive(filepath, cfg, data_dir)
     if state == "exists":
-        _send_text(token, chat_id, existing_msg)
+        _send_text(token, chat_id, existing_msg, parse_mode="HTML")
     else:
         ok, reason = _run_pipeline(filepath, sender_label, cfg, data_dir)
         _send_text(token, chat_id, "Reçu ✅" if ok else f"❌ Erreur: {reason}")

@@ -95,6 +95,33 @@ class TestParseResponse:
         assert is_inv is True
         assert conf == 0.95
 
+    def test_vision_preamble_with_document_wrapper(self):
+        """Regression: the Read-tool path echoes a <document> wrapper and code
+        fences before the JSON. The old prefix-strip parser silently failed
+        and returned confidence=0.0, routing perfect classifications to review.
+        """
+        raw = (
+            "<document>\n"
+            "Image content analyzed as external data.\n"
+            "</document>\n"
+            "\n"
+            "```json\n"
+            + self._make_json(supplier="Sariano Leonidas", amount_ttc=80.0)
+            + "\n```"
+        )
+        is_inv, conf, _, _, supplier, _, _, ttc, *_ = _parse_response(raw)
+        assert is_inv is True
+        assert conf == 0.95
+        assert supplier == "Sariano Leonidas"
+        assert ttc == 80.0
+
+    def test_json_with_trailing_narrative(self):
+        """Claude sometimes adds a sentence after the JSON explaining itself."""
+        raw = self._make_json() + "\n\nLe document est bien une facture."
+        is_inv, conf, *_ = _parse_response(raw)
+        assert is_inv is True
+        assert conf == 0.95
+
     def test_malformed_json_returns_fallback(self):
         is_inv, conf, reason, *_ = _parse_response("{bad json!!")
         # Fallback: is_invoice=True, confidence=0.0, reason starts with "Parse error"

@@ -270,6 +270,24 @@ class TestInvoiceCrud:
         db.mark_invoices_reported(initialized_db, ids)
         assert db.get_unreported_invoices(initialized_db, 2025, 3) == []
 
+    def test_get_invoice_by_source_document_id(self, initialized_db):
+        self._save_sample(initialized_db, source_name="telegram", source_id="tg-1")
+        inv = db.get_invoice_by_source_document_id(initialized_db, "telegram", "tg-1")
+        assert inv is not None
+        assert inv["filename"] == "inv.pdf"
+        assert inv["drive_file_id"] == "file-id-1"
+        assert inv["drive_web_link"] == "https://onedrive.example/file1"
+
+    def test_get_invoice_by_source_document_id_missing(self, initialized_db):
+        assert db.get_invoice_by_source_document_id(initialized_db, "telegram", "nope") is None
+
+    def test_get_invoice_returns_most_recent_on_collision(self, initialized_db):
+        """A forgotten-then-re-processed document creates two rows; we want the latest."""
+        self._save_sample(initialized_db, source_name="telegram", source_id="tg-dup", filename="old.pdf")
+        self._save_sample(initialized_db, source_name="telegram", source_id="tg-dup", filename="new.pdf")
+        inv = db.get_invoice_by_source_document_id(initialized_db, "telegram", "tg-dup")
+        assert inv["filename"] == "new.pdf"
+
     def test_save_with_null_optional_fields(self, initialized_db):
         db.save_invoice(
             initialized_db,
@@ -286,6 +304,59 @@ class TestInvoiceCrud:
         assert invoices[0]["supplier"] is None
         assert invoices[0]["amount_ht"] is None
         assert invoices[0]["email_id"] == "doc-42"
+
+
+# ---------------------------------------------------------------------------
+# forget_document — purge dedup + unreported invoice row
+# ---------------------------------------------------------------------------
+
+class TestForgetDocument:
+    def _save(self, data_dir, source_id="tg-1", reported=0):
+        db.mark_document_processed(
+            data_dir, "telegram", source_id, "cyril", "sub", "2025-03-01T00:00:00Z"
+        )
+        db.save_invoice(
+            data_dir,
+            filename="f.pdf",
+            sender="cyril",
+            received_at="2025-03-01T00:00:00Z",
+            year=2025,
+            month=3,
+            source_name="telegram",
+            source_document_id=source_id,
+            drive_file_id="drive-id",
+            drive_web_link="https://onedrive.example/x",
+        )
+        if reported:
+            conn = db.get_connection(data_dir)
+            try:
+                conn.execute(
+                    "UPDATE invoices SET reported = 1 WHERE source_document_id = ?",
+                    (source_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def test_drops_dedup_and_unreported_invoice(self, initialized_db):
+        self._save(initialized_db, source_id="tg-1", reported=0)
+        db.forget_document(initialized_db, "telegram", "tg-1")
+        assert db.is_document_processed(initialized_db, "telegram", "tg-1") is False
+        assert db.get_invoice_by_source_document_id(initialized_db, "telegram", "tg-1") is None
+
+    def test_preserves_reported_invoice(self, initialized_db):
+        """Reported invoices stay — monthly reports must remain reproducible."""
+        self._save(initialized_db, source_id="tg-rep", reported=1)
+        db.forget_document(initialized_db, "telegram", "tg-rep")
+        assert db.is_document_processed(initialized_db, "telegram", "tg-rep") is False
+        # Invoice row untouched
+        inv = db.get_invoice_by_source_document_id(initialized_db, "telegram", "tg-rep")
+        assert inv is not None
+        assert inv["reported"] == 1
+
+    def test_noop_on_missing(self, initialized_db):
+        # Must not raise
+        db.forget_document(initialized_db, "telegram", "never-existed")
 
 
 # ---------------------------------------------------------------------------
